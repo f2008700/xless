@@ -65,6 +65,18 @@ pub struct Viewer {
 
     desired_depth: u32,
     pub dimensions: TTYDimensions,
+    /// How many rows of `dimensions.height` are screenwriter chrome (the
+    /// status bar, and — once app.rs turns it on — the path header),
+    /// never document content. All the scrolling/paging math below reads
+    /// `dimensions.height` loosely as "how many rows are on screen"
+    /// (matching jless's own `JsonViewer`, which does the same rather
+    /// than threading an exact content height through every formula), so
+    /// this is a single knob screenwriter.rs's row budget stays in sync
+    /// with, instead of `Viewer` hardcoding "1, for the status bar" the
+    /// way an earlier version did — that would have silently broken
+    /// scrolling (off by one screen row) the moment a second chrome row
+    /// was added. See `content_height()`.
+    pub reserved_rows: u16,
     pub scrolloff_setting: u16,
     pub mode: Mode,
 }
@@ -77,9 +89,18 @@ impl Viewer {
             focused_row: 0,
             desired_depth: 0,
             dimensions,
+            reserved_rows: 1,
             scrolloff_setting: DEFAULT_SCROLLOFF,
             mode: Mode::Compact,
         }
+    }
+
+    /// Rows actually available for document content — `dimensions.height`
+    /// minus whatever screenwriter chrome is reserved (see
+    /// `reserved_rows`). Every scrolling/paging calculation below should
+    /// read this, not `dimensions.height` directly.
+    fn content_height(&self) -> u16 {
+        self.dimensions.height.saturating_sub(self.reserved_rows)
     }
 
     /// Jump straight to (and expand every collapsed ancestor of) whichever
@@ -196,8 +217,8 @@ impl Viewer {
             Action::FocusMatchingPair => self.focus_matching_pair(),
             Action::ScrollUp(n) => self.scroll_up(n),
             Action::ScrollDown(n) => self.scroll_down(n),
-            Action::PageUp(n) => self.scroll_up(self.dimensions.height as usize * n),
-            Action::PageDown(n) => self.scroll_down(self.dimensions.height as usize * n),
+            Action::PageUp(n) => self.scroll_up(self.content_height() as usize * n),
+            Action::PageDown(n) => self.scroll_down(self.content_height() as usize * n),
             Action::MoveFocusedLineToTop => self.move_focused_line_to_top(),
             Action::MoveFocusedLineToCenter => self.move_focused_line_to_center(),
             Action::MoveFocusedLineToBottom => self.move_focused_line_to_bottom(),
@@ -458,31 +479,23 @@ impl Viewer {
 
     fn move_focused_line_to_center(&mut self) {
         self.top_row =
-            self.count_n_lines_before(self.focused_row, self.dimensions.height as usize / 2);
+            self.count_n_lines_before(self.focused_row, self.content_height() as usize / 2);
     }
 
     fn move_focused_line_to_bottom(&mut self) {
-        self.top_row = self.count_n_lines_before(
-            self.focused_row,
-            self.dimensions.height.saturating_sub(1) as usize,
-        );
+        self.top_row = self.count_n_lines_before(self.focused_row, self.content_height() as usize);
     }
 
     fn scrolloff(&self) -> u16 {
-        self.scrolloff_setting
-            .min(self.dimensions.height.saturating_sub(1) / 2)
+        self.scrolloff_setting.min(self.content_height() / 2)
     }
 
     fn ensure_focused_row_is_visible(&mut self) {
         self.ensure_top_row_is_visible();
 
         let scrolloff = self.scrolloff();
-        let max_padding = self
-            .dimensions
-            .height
-            .saturating_sub(scrolloff)
-            .saturating_sub(1);
-        let recenter_distance = self.dimensions.height + (self.dimensions.height / 3);
+        let max_padding = self.content_height().saturating_sub(scrolloff);
+        let recenter_distance = self.content_height() + (self.content_height() / 3);
 
         let num_visible_before_focused =
             self.count_visible_rows_before(self.top_row, self.focused_row, recenter_distance + 1);
@@ -491,7 +504,7 @@ impl Viewer {
             self.top_row = self.count_n_lines_before(self.focused_row, scrolloff as usize);
         } else if num_visible_before_focused > max_padding {
             let refocus_padding = if num_visible_before_focused > recenter_distance {
-                (self.dimensions.height * 2 / 3).min(max_padding)
+                (self.content_height() * 2 / 3).min(max_padding)
             } else {
                 scrolloff
             };
@@ -503,10 +516,7 @@ impl Viewer {
 
             self.top_row = self.count_n_lines_before(
                 self.focused_row,
-                self.dimensions
-                    .height
-                    .saturating_sub(bottom_padding)
-                    .saturating_sub(1) as usize,
+                self.content_height().saturating_sub(bottom_padding) as usize,
             );
         }
     }
@@ -557,6 +567,6 @@ impl Viewer {
     }
 
     pub fn index_of_focused_row_on_screen(&self) -> u16 {
-        self.count_visible_rows_before(self.top_row, self.focused_row, self.dimensions.height)
+        self.count_visible_rows_before(self.top_row, self.focused_row, self.content_height())
     }
 }

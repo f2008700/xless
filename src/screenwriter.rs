@@ -16,10 +16,21 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use crate::flatxml::{Index, OptionIndex};
 use crate::highlighting;
 use crate::lineprinter;
+use crate::path;
 use crate::search::SearchState;
 use crate::terminal::{AnsiTerminal, Style, Terminal};
 use crate::types::TTYDimensions;
 use crate::viewer::Viewer;
+
+/// Rows of chrome `print()` reserves at the very top of the screen — the
+/// path header (see `print_header_into_buffer`). `App` (app.rs) keeps
+/// `Viewer::reserved_rows` in sync with `1 + Self::HEADER_ROWS` (the `1`
+/// being the status bar) so the scrolling math in viewer.rs always agrees
+/// with how many rows screenwriter.rs actually draws — see
+/// `Viewer::reserved_rows`'s doc comment for why that has to be a shared
+/// single source of truth rather than two independently-hardcoded
+/// row counts.
+pub const HEADER_ROWS: u16 = 1;
 
 pub struct ScreenWriter<W: IoWrite> {
     pub stdout: W,
@@ -68,7 +79,13 @@ impl<W: IoWrite> ScreenWriter<W> {
         self.terminal.output.clear();
         let _ = self.terminal.clear_screen();
 
-        let content_height = self.dimensions.without_status_bar().height;
+        self.print_header_into_buffer(viewer);
+
+        let content_height = self
+            .dimensions
+            .without_status_bar()
+            .height
+            .saturating_sub(HEADER_ROWS);
 
         // Gutter width: big enough for the largest line number that could
         // ever appear, plus one column of padding. Sized dynamically
@@ -98,7 +115,9 @@ impl<W: IoWrite> ScreenWriter<W> {
 
         let mut row = viewer.top_row;
         for screen_row in 0..content_height {
-            let _ = self.terminal.position_cursor(1, screen_row + 1);
+            let _ = self
+                .terminal
+                .position_cursor(1, screen_row + HEADER_ROWS + 1);
 
             if self.show_line_numbers {
                 self.write_gutter(viewer, row, screen_row, gutter_width);
@@ -127,7 +146,9 @@ impl<W: IoWrite> ScreenWriter<W> {
                 OptionIndex::Index(next) => row = next,
                 OptionIndex::Nil => {
                     for blank_row in (screen_row + 1)..content_height {
-                        let _ = self.terminal.position_cursor(1, blank_row + 1);
+                        let _ = self
+                            .terminal
+                            .position_cursor(1, blank_row + HEADER_ROWS + 1);
                     }
                     break;
                 }
@@ -152,6 +173,32 @@ impl<W: IoWrite> ScreenWriter<W> {
         style.dimmed = row != viewer.focused_row;
         let _ = self.terminal.set_style(&style);
         let _ = self.terminal.write_str(&text);
+        let _ = self.terminal.reset_style();
+    }
+
+    /// Row 1: the focused node's XPath (`path::build_xpath`), so it's
+    /// always visible which element you're looking at without having to
+    /// yank it or count indentation — a user asked for exactly this after
+    /// noticing `yx` already computed the same path on demand for yank.
+    /// A row with no XPath (a DocType declaration — see
+    /// `path::build_xpath`'s doc comment) shows that reason instead of a
+    /// blank line, so the header always says *something* about the
+    /// focused row rather than looking broken.
+    fn print_header_into_buffer(&mut self, viewer: &Viewer) {
+        let _ = self.terminal.position_cursor(1, 1);
+        let _ = self.terminal.clear_line();
+
+        let path_text = match path::build_xpath(&viewer.doc, viewer.focused_row) {
+            Ok(p) => p,
+            Err(e) => format!("({e})"),
+        };
+        let text = truncate_to_width(&path_text, self.dimensions.width as usize);
+
+        let mut style = Style::default();
+        style.fg = highlighting::TAG;
+        style.bold = true;
+        let _ = self.terminal.set_style(&style);
+        let _ = self.terminal.write_str(text);
         let _ = self.terminal.reset_style();
     }
 

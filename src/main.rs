@@ -73,6 +73,12 @@ fn main() {
     let mut viewer = Viewer::new(doc, dimensions);
     viewer.scrolloff_setting = opt.scrolloff;
     viewer.mode = opt.mode.into();
+    // Status bar (1 row) + the path header screenwriter.rs always draws
+    // (screenwriter::HEADER_ROWS) — fixed for the process's lifetime, so
+    // (unlike `dimensions` itself) this never needs to be touched again
+    // on a resize. See `Viewer::reserved_rows`'s doc comment for why
+    // viewer.rs's scrolling math needs to know this at all.
+    viewer.reserved_rows = 1 + screenwriter::HEADER_ROWS;
 
     let mut focus_line_warning = None;
     if let Some(line) = opt.focus_line {
