@@ -211,13 +211,15 @@ impl<W: IoWrite> ScreenWriter<W> {
     }
 
     /// Full-screen keyboard-reference overlay for `:h`/`:help` (app.rs's
-    /// `HELP_TEXT`) — replaces the document view for one frame, the same
-    /// way `less`/`man`'s help screen does; app.rs dismisses it back to
-    /// the normal view on the next keypress. If `lines` is longer than
-    /// the screen it's simply truncated (no pager-within-a-pager
-    /// scrolling) — `HELP_TEXT` is written to comfortably fit a normal
-    /// terminal, so this is a soft limit, not an expected case.
-    pub fn print_help(&mut self, lines: &[&str]) {
+    /// `HELP_TEXT`) — replaces the document view for one frame. It's a
+    /// small pager in its own right (app.rs's `handle_help_key` scrolls
+    /// it with j/k/arrows/Ctrl-d/Ctrl-u/g/G, closes it with q/Esc): an
+    /// earlier version had no `scroll` parameter and just truncated
+    /// anything past the first screen, which made most of the reference
+    /// unreachable on a normal-sized terminal — found immediately by a
+    /// user pressing the down arrow and having the whole screen close
+    /// instead of scrolling.
+    pub fn print_help(&mut self, lines: &[&str], scroll: usize) {
         self.terminal.output.clear();
         let _ = self.terminal.clear_screen();
 
@@ -226,7 +228,7 @@ impl<W: IoWrite> ScreenWriter<W> {
 
         for screen_row in 0..content_height {
             let _ = self.terminal.position_cursor(1, screen_row + 1);
-            if let Some(line) = lines.get(screen_row as usize) {
+            if let Some(line) = lines.get(scroll + screen_row as usize) {
                 let _ = self.terminal.write_str(truncate_to_width(line, width));
             }
         }
@@ -236,7 +238,14 @@ impl<W: IoWrite> ScreenWriter<W> {
         let mut style = Style::default();
         style.inverted = true;
         let _ = self.terminal.set_style(&style);
-        let footer = truncate_to_width("press any key to return", width);
+        let last_shown = (scroll + content_height as usize).min(lines.len());
+        let footer = format!(
+            "lines {}-{} of {}   j/k/arrows/Ctrl-d/Ctrl-u scroll, g/G top/bottom, q/Esc close",
+            (scroll + 1).min(lines.len()),
+            last_shown,
+            lines.len()
+        );
+        let footer = truncate_to_width(&footer, width);
         let _ = self.terminal.write_str(footer);
         let pad = width.saturating_sub(footer.width());
         for _ in 0..pad {

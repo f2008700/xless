@@ -34,7 +34,7 @@ enum Flow {
 /// decoration, with no command behind it, until a user asked "how do I
 /// see all the keyboard shortcuts" and there wasn't a good answer).
 const HELP_TEXT: &[&str] = &[
-    "xless — keyboard reference        (press any key to close)",
+    "xless — keyboard reference        (j/k/arrows scroll, q/Esc to close)",
     "",
     "Movement",
     "  j / Down          move down            k / Up      move up",
@@ -99,6 +99,8 @@ pub struct App<W: IoWrite> {
     pending: Option<char>,
     message: Option<String>,
     showing_help: bool,
+    /// First `HELP_TEXT` line currently shown at the top of the screen.
+    help_scroll: u16,
 }
 
 impl<W: IoWrite> App<W> {
@@ -115,6 +117,7 @@ impl<W: IoWrite> App<W> {
             pending: None,
             message: None,
             showing_help: false,
+            help_scroll: 0,
         }
     }
 
@@ -145,11 +148,16 @@ impl<W: IoWrite> App<W> {
             // below, and the next event's handling starts clean.
             self.message = None;
 
-            // While the help screen is up, it owns input: any key or
-            // click dismisses it back to the normal view rather than
-            // being interpreted as a command (so e.g. 'q' closes help
-            // instead of quitting xless — matches how `less`/`man`'s
-            // help behaves). A resize still just redraws help in place.
+            // While the help screen is up, it owns input and behaves like
+            // its own little pager — j/k/arrows/Ctrl-d/Ctrl-u/g/G scroll
+            // it, `q`/Esc/Ctrl-c close it back to the normal view, and
+            // anything else is just ignored. This mirrors `less`/`man`'s
+            // own help (itself a navigable pager you quit with `q`), not
+            // "any key closes it" — that first version was wrong: the
+            // reference text is longer than one screen on a normal
+            // terminal, so a key that happened to be a scroll key (e.g.
+            // the down arrow) closing the whole screen instead of
+            // scrolling made the bottom half of it unreachable.
             if self.showing_help {
                 match event {
                     TuiEvent::WinChEvent => {
@@ -157,10 +165,16 @@ impl<W: IoWrite> App<W> {
                             self.viewer.dimensions = dims;
                             self.screen_writer.dimensions = dims;
                         }
+                        self.clamp_help_scroll();
                     }
-                    TuiEvent::KeyEvent(_) | TuiEvent::MouseEvent(_) | TuiEvent::Unknown(_) => {
-                        self.showing_help = false;
+                    TuiEvent::KeyEvent(key) => self.handle_help_key(key),
+                    TuiEvent::MouseEvent(MouseEvent::Press(MouseButton::WheelUp, _, _)) => {
+                        self.scroll_help(-3)
                     }
+                    TuiEvent::MouseEvent(MouseEvent::Press(MouseButton::WheelDown, _, _)) => {
+                        self.scroll_help(3)
+                    }
+                    TuiEvent::MouseEvent(_) | TuiEvent::Unknown(_) => {}
                 }
                 self.draw();
                 continue;
@@ -669,6 +683,7 @@ impl<W: IoWrite> App<W> {
             self.screen_writer.show_relative_line_numbers = false;
         } else if command == "h" || command == "help" {
             self.showing_help = true;
+            self.help_scroll = 0;
         } else if !command.is_empty() {
             self.message = Some(format!("unknown command: {command}"));
         }
@@ -694,9 +709,47 @@ impl<W: IoWrite> App<W> {
         }
     }
 
+    // --- Help screen (a tiny pager of its own) ---------------------------
+
+    fn handle_help_key(&mut self, key: Key) {
+        match key {
+            Key::Char('q') | Key::Esc | Key::Ctrl('c') => self.showing_help = false,
+            Key::Char('j') | Key::Down => self.scroll_help(1),
+            Key::Char('k') | Key::Up => self.scroll_help(-1),
+            Key::Char(' ') | Key::Ctrl('d') | Key::PageDown => {
+                self.scroll_help(self.help_page_size())
+            }
+            Key::Ctrl('u') | Key::PageUp => self.scroll_help(-self.help_page_size()),
+            Key::Char('g') | Key::Home => self.help_scroll = 0,
+            Key::Char('G') | Key::End => {
+                self.help_scroll = self.help_max_scroll();
+            }
+            _ => {}
+        }
+    }
+
+    fn help_page_size(&self) -> i32 {
+        self.screen_writer.dimensions.without_status_bar().height as i32
+    }
+
+    fn help_max_scroll(&self) -> u16 {
+        let content_height = self.screen_writer.dimensions.without_status_bar().height as usize;
+        HELP_TEXT.len().saturating_sub(content_height) as u16
+    }
+
+    fn scroll_help(&mut self, delta: i32) {
+        let new = (self.help_scroll as i32 + delta).max(0) as u16;
+        self.help_scroll = new.min(self.help_max_scroll());
+    }
+
+    fn clamp_help_scroll(&mut self) {
+        self.help_scroll = self.help_scroll.min(self.help_max_scroll());
+    }
+
     fn draw(&mut self) {
         if self.showing_help {
-            self.screen_writer.print_help(HELP_TEXT);
+            self.screen_writer
+                .print_help(HELP_TEXT, self.help_scroll as usize);
         } else {
             self.screen_writer.print(
                 &self.viewer,
