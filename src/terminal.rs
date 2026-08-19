@@ -12,8 +12,8 @@ pub enum Color {
     Default,
 }
 
-// RED/GREEN/BLUE/DEFAULT round out the 16-color palette this was ported
-// with (~/git/jless/src/terminal.rs) but aren't picked by any current
+// RED/GREEN/DEFAULT round out the 16-color palette this was ported with
+// (~/git/jless/src/terminal.rs) but aren't picked by any current
 // highlighting.rs mapping — kept for whichever future palette choice
 // wants them rather than trimmed to exactly what's used today.
 #[allow(dead_code)]
@@ -21,7 +21,6 @@ pub const RED: Color = Color::C16(1);
 #[allow(dead_code)]
 pub const GREEN: Color = Color::C16(2);
 pub const YELLOW: Color = Color::C16(3);
-#[allow(dead_code)]
 pub const BLUE: Color = Color::C16(4);
 pub const MAGENTA: Color = Color::C16(5);
 pub const CYAN: Color = Color::C16(6);

@@ -73,13 +73,14 @@ impl<W: IoWrite> ScreenWriter<W> {
         dirty: bool,
         search: &SearchState,
         message: &Option<String>,
+        path_style: path::PathStyle,
     ) {
         let doc = &viewer.doc;
 
         self.terminal.output.clear();
         let _ = self.terminal.clear_screen();
 
-        self.print_header_into_buffer(viewer);
+        self.print_header_into_buffer(viewer, path_style);
 
         let content_height = self
             .dimensions
@@ -176,29 +177,36 @@ impl<W: IoWrite> ScreenWriter<W> {
         let _ = self.terminal.reset_style();
     }
 
-    /// Row 1: the focused node's XPath (`path::build_xpath`), so it's
-    /// always visible which element you're looking at without having to
-    /// yank it or count indentation — a user asked for exactly this after
-    /// noticing `yx` already computed the same path on demand for yank.
-    /// A row with no XPath (a DocType declaration — see
-    /// `path::build_xpath`'s doc comment) shows that reason instead of a
-    /// blank line, so the header always says *something* about the
-    /// focused row rather than looking broken.
-    fn print_header_into_buffer(&mut self, viewer: &Viewer) {
+    /// Row 1: the focused node's path (`path::build_path`, in whichever
+    /// of the two flavors `style` picks — see `path::PathStyle`), so
+    /// it's always visible which element you're looking at without
+    /// having to yank it or count indentation — a user asked for exactly
+    /// this after noticing `yx` already computed the XPath flavor on
+    /// demand for yank, then asked for a plain-breadcrumb alternative and
+    /// for the row to actually stand out visually. Filled with a solid
+    /// background color across the *whole* width (not just behind the
+    /// text) for that — same "read as a distinct bar" reasoning as the
+    /// status bar's inverted style, but a dedicated color instead of
+    /// inverted so it's visually distinguishable from the status bar
+    /// rather than looking like a second copy of it.
+    fn print_header_into_buffer(&mut self, viewer: &Viewer, style: path::PathStyle) {
         let _ = self.terminal.position_cursor(1, 1);
         let _ = self.terminal.clear_line();
 
-        let path_text = match path::build_xpath(&viewer.doc, viewer.focused_row) {
-            Ok(p) => p,
-            Err(e) => format!("({e})"),
-        };
-        let text = truncate_to_width(&path_text, self.dimensions.width as usize);
+        let path_text = path::build_path(&viewer.doc, viewer.focused_row, style);
+        let width = self.dimensions.width as usize;
+        let text = truncate_to_width(&path_text, width);
 
-        let mut style = Style::default();
-        style.fg = highlighting::TAG;
-        style.bold = true;
-        let _ = self.terminal.set_style(&style);
+        let mut term_style = Style::default();
+        term_style.fg = highlighting::HEADER_FG;
+        term_style.bg = highlighting::HEADER_BG;
+        term_style.bold = true;
+        let _ = self.terminal.set_style(&term_style);
         let _ = self.terminal.write_str(text);
+        let pad = width.saturating_sub(text.width());
+        for _ in 0..pad {
+            let _ = self.terminal.write_str(" ");
+        }
         let _ = self.terminal.reset_style();
     }
 

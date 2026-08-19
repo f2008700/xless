@@ -56,6 +56,7 @@ const HELP_TEXT: &[&str] = &[
     "  space / Enter     toggle collapse of the focused element",
     "  c / e             collapse / expand the focused element and its siblings",
     "  m                 toggle Line / Compact mode",
+    "  X                 toggle the header between XPath and a plain breadcrumb path",
     "",
     "Search",
     "  /pattern Enter    search forward (regex)",
@@ -101,6 +102,9 @@ pub struct App<W: IoWrite> {
     showing_help: bool,
     /// First `HELP_TEXT` line currently shown at the top of the screen.
     help_scroll: u16,
+    /// Which flavor the header bar (screenwriter.rs's
+    /// `print_header_into_buffer`) shows — toggled with `X`.
+    path_style: path::PathStyle,
 }
 
 impl<W: IoWrite> App<W> {
@@ -118,6 +122,7 @@ impl<W: IoWrite> App<W> {
             message: None,
             showing_help: false,
             help_scroll: 0,
+            path_style: path::PathStyle::XPath,
         }
     }
 
@@ -307,6 +312,10 @@ impl<W: IoWrite> App<W> {
             Key::Char('c') => self.viewer.perform_action(Action::CollapseNodeAndSiblings),
             Key::Char('e') => self.viewer.perform_action(Action::ExpandNodeAndSiblings),
             Key::Char('m') => self.viewer.perform_action(Action::ToggleMode),
+            Key::Char('X') => {
+                self.path_style = self.path_style.toggled();
+                self.message = Some(format!("header now showing {}", self.path_style.label()));
+            }
             Key::Ctrl('d') | Key::PageDown => {
                 let n = self.take_count();
                 self.viewer.perform_action(Action::PageDown(n));
@@ -757,6 +766,7 @@ impl<W: IoWrite> App<W> {
                 self.edit_history.is_dirty(),
                 &self.search,
                 &self.message,
+                self.path_style,
             );
         }
     }

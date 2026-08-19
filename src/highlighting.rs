@@ -34,6 +34,14 @@ pub const PUNCTUATION: Color = terminal::LIGHT_BLACK;
 pub const LINE_NUMBER: Color = terminal::LIGHT_BLACK;
 pub const SEARCH_MATCH_BG: Color = Color::C16(3); // yellow-ish background highlight
 
+// The path header bar (screenwriter.rs's print_header_into_buffer) — a
+// filled background color, not just colored text on the default
+// background, so it reads as a distinct "bar" the same way the status
+// bar's inverted style does, rather than just another highlighted line
+// of content. Also reuses `terminal::BLUE`, which nothing else used yet.
+pub const HEADER_BG: Color = terminal::BLUE;
+pub const HEADER_FG: Color = terminal::WHITE;
+
 pub fn style_for(value: &Value) -> Style {
     let fg = match value {
         Value::Text => TEXT,
