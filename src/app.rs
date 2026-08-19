@@ -26,6 +26,68 @@ enum Flow {
     Quit,
 }
 
+/// The keyboard reference shown by `:h`/`:help` (see `command_mode` and
+/// `ScreenWriter::print_help`). Kept as one literal block, in the same
+/// order as `handle_key`/`handle_prefixed_key` below, specifically so
+/// it's easy to eyeball against that match when either changes — this
+/// used to not exist at all (the status bar's ":help" hint was pure
+/// decoration, with no command behind it, until a user asked "how do I
+/// see all the keyboard shortcuts" and there wasn't a good answer).
+const HELP_TEXT: &[&str] = &[
+    "xless — keyboard reference        (press any key to close)",
+    "",
+    "Movement",
+    "  j / Down          move down            k / Up      move up",
+    "  h / Left          collapse / parent     l / Right   expand / first child",
+    "  H                 focus parent",
+    "  J / K             focus next / previous sibling",
+    "  ^ / $             focus first / last sibling",
+    "  g / Home          focus top             G / End     focus bottom",
+    "  <N>G              focus row N (e.g. 42G)",
+    "  %                 jump to matching open/close tag",
+    "  <N> prefix        repeat count, e.g. 5j, 3J (also works with Ctrl-d/Ctrl-u)",
+    "",
+    "Scrolling",
+    "  Ctrl-d / PageDown   page down           Ctrl-u / PageUp   page up",
+    "  Ctrl-e              scroll down 1 line  Ctrl-y            scroll up 1 line",
+    "  t / z / b           move focused line to top / center / bottom of screen",
+    "",
+    "Viewing",
+    "  space / Enter     toggle collapse of the focused element",
+    "  c / e             collapse / expand the focused element and its siblings",
+    "  m                 toggle Line / Compact mode",
+    "",
+    "Search",
+    "  /pattern Enter    search forward (regex)",
+    "  ?pattern Enter    search backward (regex)",
+    "  n / N             repeat search: same direction / opposite direction",
+    "",
+    "Yank (system clipboard) / paste",
+    "  yy   pretty-printed subtree     yl   subtree as one line",
+    "  yt   concatenated text content  yn   tag name",
+    "  yx   XPath to focused node",
+    "  p / P   paste clipboard as next / previous sibling",
+    "",
+    "Editing",
+    "  i     edit text / attributes of the focused row",
+    "  r     rename the focused element's tag",
+    "  o / O   insert a new element as next / previous sibling",
+    "  dd    delete the focused element",
+    "  u / Ctrl-r   undo / redo",
+    "",
+    "Command mode (:)",
+    "  :w [path]     save (to path, or the current file)",
+    "  :wq           save and quit",
+    "  :q            quit (warns if there are unsaved edits)",
+    "  :q!           quit, discarding unsaved edits",
+    "  :set number / nonumber              toggle line numbers",
+    "  :set relativenumber / norelativenumber   toggle relative line numbers",
+    "  :h / :help    show this screen",
+    "",
+    "Mouse: click focuses a row, wheel scrolls.",
+    "q / Ctrl-c: quit.   Esc: cancel a pending count/prefix.",
+];
+
 pub struct App<W: IoWrite> {
     pub viewer: Viewer,
     pub screen_writer: ScreenWriter<W>,
@@ -36,6 +98,7 @@ pub struct App<W: IoWrite> {
     count_buffer: String,
     pending: Option<char>,
     message: Option<String>,
+    showing_help: bool,
 }
 
 impl<W: IoWrite> App<W> {
@@ -51,6 +114,7 @@ impl<W: IoWrite> App<W> {
             count_buffer: String::new(),
             pending: None,
             message: None,
+            showing_help: false,
         }
     }
 
@@ -80,6 +144,27 @@ impl<W: IoWrite> App<W> {
             // handling this event survives to this iteration's `draw()`
             // below, and the next event's handling starts clean.
             self.message = None;
+
+            // While the help screen is up, it owns input: any key or
+            // click dismisses it back to the normal view rather than
+            // being interpreted as a command (so e.g. 'q' closes help
+            // instead of quitting xless — matches how `less`/`man`'s
+            // help behaves). A resize still just redraws help in place.
+            if self.showing_help {
+                match event {
+                    TuiEvent::WinChEvent => {
+                        if let Some(dims) = query_terminal_size() {
+                            self.viewer.dimensions = dims;
+                            self.screen_writer.dimensions = dims;
+                        }
+                    }
+                    TuiEvent::KeyEvent(_) | TuiEvent::MouseEvent(_) | TuiEvent::Unknown(_) => {
+                        self.showing_help = false;
+                    }
+                }
+                self.draw();
+                continue;
+            }
 
             let flow = match event {
                 TuiEvent::WinChEvent => {
@@ -582,6 +667,8 @@ impl<W: IoWrite> App<W> {
             self.screen_writer.show_relative_line_numbers = true;
         } else if command == "set norelativenumber" {
             self.screen_writer.show_relative_line_numbers = false;
+        } else if command == "h" || command == "help" {
+            self.showing_help = true;
         } else if !command.is_empty() {
             self.message = Some(format!("unknown command: {command}"));
         }
@@ -608,13 +695,17 @@ impl<W: IoWrite> App<W> {
     }
 
     fn draw(&mut self) {
-        self.screen_writer.print(
-            &self.viewer,
-            &self.filename,
-            self.edit_history.is_dirty(),
-            &self.search,
-            &self.message,
-        );
+        if self.showing_help {
+            self.screen_writer.print_help(HELP_TEXT);
+        } else {
+            self.screen_writer.print(
+                &self.viewer,
+                &self.filename,
+                self.edit_history.is_dirty(),
+                &self.search,
+                &self.message,
+            );
+        }
     }
 }
 

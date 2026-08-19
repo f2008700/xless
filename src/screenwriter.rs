@@ -209,4 +209,41 @@ impl<W: IoWrite> ScreenWriter<W> {
         let _ = self.terminal.write_str(text);
         let _ = self.terminal.flush_contents(&mut self.stdout);
     }
+
+    /// Full-screen keyboard-reference overlay for `:h`/`:help` (app.rs's
+    /// `HELP_TEXT`) — replaces the document view for one frame, the same
+    /// way `less`/`man`'s help screen does; app.rs dismisses it back to
+    /// the normal view on the next keypress. If `lines` is longer than
+    /// the screen it's simply truncated (no pager-within-a-pager
+    /// scrolling) — `HELP_TEXT` is written to comfortably fit a normal
+    /// terminal, so this is a soft limit, not an expected case.
+    pub fn print_help(&mut self, lines: &[&str]) {
+        self.terminal.output.clear();
+        let _ = self.terminal.clear_screen();
+
+        let content_height = self.dimensions.without_status_bar().height;
+        let width = self.dimensions.width as usize;
+
+        for screen_row in 0..content_height {
+            let _ = self.terminal.position_cursor(1, screen_row + 1);
+            if let Some(line) = lines.get(screen_row as usize) {
+                let _ = self.terminal.write_str(truncate_to_width(line, width));
+            }
+        }
+
+        let _ = self.terminal.position_cursor(1, self.dimensions.height);
+        let _ = self.terminal.clear_line();
+        let mut style = Style::default();
+        style.inverted = true;
+        let _ = self.terminal.set_style(&style);
+        let footer = truncate_to_width("press any key to return", width);
+        let _ = self.terminal.write_str(footer);
+        let pad = width.saturating_sub(footer.width());
+        for _ in 0..pad {
+            let _ = self.terminal.write_str(" ");
+        }
+        let _ = self.terminal.reset_style();
+
+        let _ = self.terminal.flush_contents(&mut self.stdout);
+    }
 }
