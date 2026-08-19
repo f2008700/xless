@@ -1,0 +1,32 @@
+[package]
+name = "xless"
+version = "0.1.0"
+authors = ["Vikas Goel"]
+license = "MIT"
+description = "A command-line XML viewer and editor (jless for XML)"
+keywords = ["cli", "xml"]
+categories = ["command-line-utilities"]
+repository = "https://github.com/vikasgoel/xless"
+edition = "2021"
+rust-version = "1.75"
+
+[[bin]]
+name = "xless"
+path = "src/main.rs"
+
+[dependencies]
+quick-xml = "0.36"
+memmap2 = "0.9"
+clap = { version = "4.0", features = ["derive"] }
+unicode-width = "0.1"
+termion = "3.0"
+signal-hook = "0.3"
+libc = "0.2"
+regex = "1.10"
+
+[dev-dependencies]
+indoc = "2.0"
+
+[profile.release]
+opt-level = 3
+lto = true
