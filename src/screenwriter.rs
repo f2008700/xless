@@ -274,7 +274,7 @@ impl<W: IoWrite> ScreenWriter<W> {
     /// unreachable on a normal-sized terminal — found immediately by a
     /// user pressing the down arrow and having the whole screen close
     /// instead of scrolling.
-    pub fn print_help(&mut self, lines: &[&str], scroll: usize) {
+    pub fn print_help(&mut self, lines: &[String], scroll: usize) {
         self.terminal.output.clear();
         let _ = self.terminal.clear_screen();
 

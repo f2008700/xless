@@ -12,6 +12,7 @@ use std::path::PathBuf;
 use termion::event::{Key, MouseButton, MouseEvent};
 
 use crate::clipboard;
+use crate::config::{self, AppAction, YankTarget};
 use crate::edit::{self, EditHistory};
 use crate::flatxml::Index;
 use crate::input::TuiEvent;
@@ -26,81 +27,23 @@ enum Flow {
     Quit,
 }
 
-/// The keyboard reference shown by `:h`/`:help` (see `command_mode` and
-/// `ScreenWriter::print_help`). Kept as one literal block, in the same
-/// order as `handle_key`/`handle_prefixed_key` below, specifically so
-/// it's easy to eyeball against that match when either changes — this
-/// used to not exist at all (the status bar's ":help" hint was pure
-/// decoration, with no command behind it, until a user asked "how do I
-/// see all the keyboard shortcuts" and there wasn't a good answer).
-const HELP_TEXT: &[&str] = &[
-    "xless — keyboard reference        (j/k/arrows scroll, q/Esc to close)",
-    "",
-    "Movement",
-    "  j / Down          move down            k / Up      move up",
-    "  h / Left          collapse / parent     l / Right   expand / first child",
-    "  H                 focus parent",
-    "  J / K             focus next / previous sibling",
-    "  ^ / $             focus first / last sibling",
-    "  g / Home          focus top             G / End     focus bottom",
-    "  <N>G              focus row N (e.g. 42G)",
-    "  %                 jump to matching open/close tag",
-    "  <N> prefix        repeat count, e.g. 5j, 3J (also works with Ctrl-d/Ctrl-u)",
-    "",
-    "Scrolling",
-    "  Ctrl-d / PageDown   page down           Ctrl-u / PageUp   page up",
-    "  Ctrl-e              scroll down 1 line  Ctrl-y            scroll up 1 line",
-    "  t / z / b           move focused line to top / center / bottom of screen",
-    "",
-    "Viewing",
-    "  space / Enter     toggle collapse of the focused element",
-    "  c / e             collapse / expand the focused element and its siblings",
-    "  m                 toggle Line / Compact mode",
-    "  X                 toggle the header between XPath and a plain breadcrumb path",
-    "",
-    "Search",
-    "  /pattern Enter    search forward (regex)",
-    "  ?pattern Enter    search backward (regex)",
-    "  n / N             repeat search: same direction / opposite direction",
-    "",
-    "Yank (system clipboard) / paste",
-    "  yy   pretty-printed subtree     yl   subtree as one line",
-    "  yt   concatenated text content  yn   tag name",
-    "  yx   XPath to focused node",
-    "  p / P   paste clipboard as next / previous sibling",
-    "",
-    "Editing",
-    "  i     edit text / attributes of the focused row",
-    "  r     rename the focused element's tag",
-    "  o / O   insert a new element as next / previous sibling",
-    "  dd    delete the focused element",
-    "  u / Ctrl-r   undo / redo",
-    "",
-    "Command mode (:)",
-    "  :w [path]     save (to path, or the current file)",
-    "  :wq           save and quit",
-    "  :q            quit (warns if there are unsaved edits)",
-    "  :q!           quit, discarding unsaved edits",
-    "  :set number / nonumber              toggle line numbers",
-    "  :set relativenumber / norelativenumber   toggle relative line numbers",
-    "  :h / :help    show this screen",
-    "",
-    "Mouse: click focuses a row, wheel scrolls.",
-    "q / Ctrl-c: quit.   Esc: cancel a pending count/prefix.",
-];
-
 pub struct App<W: IoWrite> {
     pub viewer: Viewer,
     pub screen_writer: ScreenWriter<W>,
     pub filename: String,
     pub file_path: Option<PathBuf>,
+    keymap: config::Keymap,
     search: SearchState,
     edit_history: EditHistory,
     count_buffer: String,
-    pending: Option<char>,
+    /// Only ever `Some(AppAction::DeletePrefix)` or
+    /// `Some(AppAction::YankPrefix)` — see `handle_prefixed_key`.
+    pending: Option<AppAction>,
     message: Option<String>,
     showing_help: bool,
-    /// First `HELP_TEXT` line currently shown at the top of the screen.
+    /// First line of the (freshly-generated-per-frame — see
+    /// `build_help_text`) help text currently shown at the top of the
+    /// screen.
     help_scroll: u16,
     /// Which flavor the header bar (screenwriter.rs's
     /// `print_header_into_buffer`) shows — toggled with `X`.
@@ -108,13 +51,20 @@ pub struct App<W: IoWrite> {
 }
 
 impl<W: IoWrite> App<W> {
-    pub fn new(viewer: Viewer, filename: String, file_path: Option<PathBuf>, stdout: W) -> App<W> {
+    pub fn new(
+        viewer: Viewer,
+        filename: String,
+        file_path: Option<PathBuf>,
+        keymap: config::Keymap,
+        stdout: W,
+    ) -> App<W> {
         let dimensions = viewer.dimensions;
         App {
             viewer,
             screen_writer: ScreenWriter::new(stdout, dimensions),
             filename,
             file_path,
+            keymap,
             search: SearchState::default(),
             edit_history: EditHistory::default(),
             count_buffer: String::new(),
@@ -124,6 +74,86 @@ impl<W: IoWrite> App<W> {
             help_scroll: 0,
             path_style: path::PathStyle::XPath,
         }
+    }
+
+    /// Regenerated on demand (cheap — a few dozen short strings), rather
+    /// than built once and cached, specifically so it always reflects
+    /// whatever's *actually* bound right now — the whole point of
+    /// driving `:help` from `config::ACTIONS`/`self.keymap` instead of a
+    /// static string table, which is what this used to be and which had
+    /// no way to ever agree with a user's remapped keys.
+    fn build_help_text(&self) -> Vec<String> {
+        let mut lines = Vec::new();
+        lines.push(
+            "xless — keyboard reference        (j/k/arrows scroll, q/Esc to close)".to_string(),
+        );
+        lines.push(String::new());
+
+        let mut last_section = "";
+        for info in config::ACTIONS {
+            if info.section != last_section {
+                if !last_section.is_empty() {
+                    lines.push(String::new());
+                }
+                lines.push(info.section.to_string());
+                last_section = info.section;
+            }
+
+            let keys = self.keymap.keys_for(info.action);
+            let key_str = if keys.is_empty() {
+                "(unbound)".to_string()
+            } else {
+                keys.iter()
+                    .map(config::key_spec_to_string)
+                    .collect::<Vec<_>>()
+                    .join(" / ")
+            };
+            lines.push(format!("  {key_str:<18} {}", info.description));
+
+            // The yank-target sub-keys are a separate map
+            // (config::YANK_TARGETS), pressed *after* whatever key(s)
+            // trigger YankPrefix — list them right under it rather than
+            // as their own top-level ACTIONS entries, since on their own
+            // they're not reachable from Normal mode at all.
+            if info.action == AppAction::YankPrefix {
+                for target_info in config::YANK_TARGETS {
+                    let key_str = match self.keymap.key_for_yank_target(target_info.target) {
+                        Some(k) => config::key_spec_to_string(&k),
+                        None => "(unbound)".to_string(),
+                    };
+                    lines.push(format!(
+                        "    then {key_str:<13} {}",
+                        target_info.description
+                    ));
+                }
+            }
+        }
+
+        lines.push(String::new());
+        lines.push("Command mode (:)".to_string());
+        lines.push("  :w [path]     save (to path, or the current file)".to_string());
+        lines.push("  :wq           save and quit".to_string());
+        lines.push("  :q            quit (warns if there are unsaved edits)".to_string());
+        lines.push("  :q!           quit, discarding unsaved edits".to_string());
+        lines.push("  :set number / nonumber              toggle line numbers".to_string());
+        lines.push(
+            "  :set relativenumber / norelativenumber   toggle relative line numbers".to_string(),
+        );
+        lines.push("  :h / :help    show this screen".to_string());
+        lines.push(String::new());
+        lines.push("Mouse: click focuses a row, wheel scrolls.".to_string());
+        lines.push(
+            "Esc: cancel a pending count/prefix. Ctrl-c: force quit. (Both always active, not configurable.)"
+                .to_string(),
+        );
+        lines.push(format!(
+            "Settings file: {} — see docs/CONFIG.md",
+            config::default_config_path()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "(unavailable — $HOME not set)".to_string())
+        ));
+
+        lines
     }
 
     /// Sets a one-shot status message to show on the very first frame —
@@ -260,9 +290,23 @@ impl<W: IoWrite> App<W> {
             return self.handle_prefixed_key(prefix, key);
         }
 
-        match key {
-            Key::Ctrl('c') => return Flow::Quit,
-            Key::Char('q') => {
+        // Hardcoded, never remappable — see config.rs's module doc
+        // comment on why: an unconditional escape hatch that a broken or
+        // overly-creative config can never take away.
+        if key == Key::Ctrl('c') {
+            return Flow::Quit;
+        }
+        if key == Key::Esc {
+            self.count_buffer.clear();
+            return Flow::Continue;
+        }
+
+        let Some(action) = self.keymap.actions.get(&key).copied() else {
+            return Flow::Continue;
+        };
+
+        match action {
+            AppAction::Quit => {
                 if self.edit_history.is_dirty() {
                     self.message = Some(
                         "unsaved changes — :w to save, :q! to discard, or :wq to save & quit"
@@ -273,32 +317,32 @@ impl<W: IoWrite> App<W> {
                 return Flow::Quit;
             }
 
-            Key::Char('j') | Key::Down => {
+            AppAction::MoveDown => {
                 let n = self.take_count();
                 self.viewer.perform_action(Action::MoveDown(n));
             }
-            Key::Char('k') | Key::Up => {
+            AppAction::MoveUp => {
                 let n = self.take_count();
                 self.viewer.perform_action(Action::MoveUp(n));
             }
-            Key::Char('h') | Key::Left => self.viewer.perform_action(Action::MoveLeft),
-            Key::Char('l') | Key::Right => self.viewer.perform_action(Action::MoveRight),
-            Key::Char('H') => self.viewer.perform_action(Action::FocusParent),
-            Key::Char('J') => {
+            AppAction::MoveLeft => self.viewer.perform_action(Action::MoveLeft),
+            AppAction::MoveRight => self.viewer.perform_action(Action::MoveRight),
+            AppAction::FocusParent => self.viewer.perform_action(Action::FocusParent),
+            AppAction::FocusNextSibling => {
                 let n = self.take_count();
                 self.viewer.perform_action(Action::FocusNextSibling(n));
             }
-            Key::Char('K') => {
+            AppAction::FocusPrevSibling => {
                 let n = self.take_count();
                 self.viewer.perform_action(Action::FocusPrevSibling(n));
             }
-            Key::Char('^') => self.viewer.perform_action(Action::FocusFirstSibling),
-            Key::Char('$') => self.viewer.perform_action(Action::FocusLastSibling),
-            Key::Char('g') | Key::Home => {
+            AppAction::FocusFirstSibling => self.viewer.perform_action(Action::FocusFirstSibling),
+            AppAction::FocusLastSibling => self.viewer.perform_action(Action::FocusLastSibling),
+            AppAction::FocusTop => {
                 self.count_buffer.clear();
                 self.viewer.perform_action(Action::FocusTop);
             }
-            Key::Char('G') | Key::End => {
+            AppAction::FocusBottom => {
                 if self.count_buffer.is_empty() {
                     self.viewer.perform_action(Action::FocusBottom);
                 } else {
@@ -307,69 +351,89 @@ impl<W: IoWrite> App<W> {
                     self.viewer.perform_action(Action::JumpTo(row));
                 }
             }
-            Key::Char('%') => self.viewer.perform_action(Action::FocusMatchingPair),
-            Key::Char(' ') | Key::Char('\n') => self.viewer.perform_action(Action::ToggleCollapsed),
-            Key::Char('c') => self.viewer.perform_action(Action::CollapseNodeAndSiblings),
-            Key::Char('e') => self.viewer.perform_action(Action::ExpandNodeAndSiblings),
-            Key::Char('m') => self.viewer.perform_action(Action::ToggleMode),
-            Key::Char('X') => {
+            AppAction::FocusMatchingPair => self.viewer.perform_action(Action::FocusMatchingPair),
+            AppAction::ToggleCollapsed => self.viewer.perform_action(Action::ToggleCollapsed),
+            AppAction::CollapseNodeAndSiblings => {
+                self.viewer.perform_action(Action::CollapseNodeAndSiblings)
+            }
+            AppAction::ExpandNodeAndSiblings => {
+                self.viewer.perform_action(Action::ExpandNodeAndSiblings)
+            }
+            AppAction::ToggleMode => self.viewer.perform_action(Action::ToggleMode),
+            AppAction::TogglePathStyle => {
                 self.path_style = self.path_style.toggled();
                 self.message = Some(format!("header now showing {}", self.path_style.label()));
             }
-            Key::Ctrl('d') | Key::PageDown => {
+            AppAction::PageDown => {
                 let n = self.take_count();
                 self.viewer.perform_action(Action::PageDown(n));
             }
-            Key::Ctrl('u') | Key::PageUp => {
+            AppAction::PageUp => {
                 let n = self.take_count();
                 self.viewer.perform_action(Action::PageUp(n));
             }
-            Key::Ctrl('e') => self.viewer.perform_action(Action::ScrollDown(1)),
-            Key::Ctrl('y') => self.viewer.perform_action(Action::ScrollUp(1)),
-            Key::Char('t') => self.viewer.perform_action(Action::MoveFocusedLineToTop),
-            Key::Char('z') => self.viewer.perform_action(Action::MoveFocusedLineToCenter),
-            Key::Char('b') => self.viewer.perform_action(Action::MoveFocusedLineToBottom),
-
-            Key::Char('d') | Key::Char('y') => {
-                self.pending = Some(if key == Key::Char('d') { 'd' } else { 'y' });
+            AppAction::ScrollDown => self.viewer.perform_action(Action::ScrollDown(1)),
+            AppAction::ScrollUp => self.viewer.perform_action(Action::ScrollUp(1)),
+            AppAction::MoveFocusedLineToTop => {
+                self.viewer.perform_action(Action::MoveFocusedLineToTop)
+            }
+            AppAction::MoveFocusedLineToCenter => {
+                self.viewer.perform_action(Action::MoveFocusedLineToCenter)
+            }
+            AppAction::MoveFocusedLineToBottom => {
+                self.viewer.perform_action(Action::MoveFocusedLineToBottom)
             }
 
-            Key::Char('r') => self.rename_focused(input),
-            Key::Char('i') => self.edit_content(input),
-            Key::Char('o') => self.insert_sibling(input, true),
-            Key::Char('O') => self.insert_sibling(input, false),
-            Key::Char('p') => self.paste_sibling(true),
-            Key::Char('P') => self.paste_sibling(false),
-            Key::Char('u') => self.do_undo(),
-            Key::Ctrl('r') => self.do_redo(),
+            AppAction::DeletePrefix => self.pending = Some(AppAction::DeletePrefix),
+            AppAction::YankPrefix => self.pending = Some(AppAction::YankPrefix),
 
-            Key::Char('/') => self.start_search(input, Direction::Forward),
-            Key::Char('?') => self.start_search(input, Direction::Reverse),
-            // 'n' repeats the last search in whichever direction it was
-            // originally made ('?' searches stay "backwards" on 'n');
-            // 'N' repeats it in the opposite direction — vim's convention,
-            // not "n=forward/N=backward" regardless of how the search
-            // started.
-            Key::Char('n') => self.jump_to_match(self.search.direction),
-            Key::Char('N') => self.jump_to_match(self.search.direction.reversed()),
+            AppAction::Rename => self.rename_focused(input),
+            AppAction::EditContent => self.edit_content(input),
+            AppAction::InsertAfter => self.insert_sibling(input, true),
+            AppAction::InsertBefore => self.insert_sibling(input, false),
+            AppAction::PasteAfter => self.paste_sibling(true),
+            AppAction::PasteBefore => self.paste_sibling(false),
+            AppAction::Undo => self.do_undo(),
+            AppAction::Redo => self.do_redo(),
 
-            Key::Char(':') => return self.command_mode(input),
+            AppAction::SearchForward => self.start_search(input, Direction::Forward),
+            AppAction::SearchBackward => self.start_search(input, Direction::Reverse),
+            // search_next repeats the last search in whichever direction
+            // it was originally made ('?' searches stay "backwards" on
+            // search_next); search_prev repeats it in the opposite
+            // direction — vim's convention, not "next=forward/
+            // prev=backward" regardless of how the search started.
+            AppAction::SearchNext => self.jump_to_match(self.search.direction),
+            AppAction::SearchPrev => self.jump_to_match(self.search.direction.reversed()),
 
-            Key::Esc => self.count_buffer.clear(),
-            _ => {}
+            AppAction::CommandMode => return self.command_mode(input),
         }
 
         Flow::Continue
     }
 
-    fn handle_prefixed_key(&mut self, prefix: char, key: Key) -> Flow {
-        match (prefix, key) {
-            ('d', Key::Char('d')) => self.delete_focused(),
-            ('y', Key::Char('y')) => self.yank(crate::lineprinter::pretty_printed_subtree),
-            ('y', Key::Char('l')) => self.yank(crate::lineprinter::one_line_subtree),
-            ('y', Key::Char('t')) => self.yank(crate::lineprinter::text_content),
-            ('y', Key::Char('n')) => self.yank(|doc, i| doc.row_text(i).to_string()),
-            ('y', Key::Char('x')) => self.yank_xpath(),
+    fn handle_prefixed_key(&mut self, prefix: AppAction, key: Key) -> Flow {
+        match prefix {
+            AppAction::DeletePrefix => {
+                // vim's "dd" convention, generalized to whatever key(s)
+                // are actually configured for delete_node: pressing it
+                // again confirms, matching any other key cancels.
+                if self.keymap.actions.get(&key) == Some(&AppAction::DeletePrefix) {
+                    self.delete_focused();
+                }
+            }
+            AppAction::YankPrefix => {
+                if let Some(target) = self.keymap.yank_targets.get(&key).copied() {
+                    match target {
+                        YankTarget::Pretty => self.yank(crate::lineprinter::pretty_printed_subtree),
+                        YankTarget::OneLine => self.yank(crate::lineprinter::one_line_subtree),
+                        YankTarget::TextContent => self.yank(crate::lineprinter::text_content),
+                        YankTarget::TagName => self.yank(|doc, i| doc.row_text(i).to_string()),
+                        YankTarget::XPath => self.yank_xpath(),
+                    }
+                }
+            }
+            // `pending` is only ever set to one of the two arms above.
             _ => {}
         }
         Flow::Continue
@@ -743,7 +807,7 @@ impl<W: IoWrite> App<W> {
 
     fn help_max_scroll(&self) -> u16 {
         let content_height = self.screen_writer.dimensions.without_status_bar().height as usize;
-        HELP_TEXT.len().saturating_sub(content_height) as u16
+        self.build_help_text().len().saturating_sub(content_height) as u16
     }
 
     fn scroll_help(&mut self, delta: i32) {
@@ -757,8 +821,9 @@ impl<W: IoWrite> App<W> {
 
     fn draw(&mut self) {
         if self.showing_help {
+            let text = self.build_help_text();
             self.screen_writer
-                .print_help(HELP_TEXT, self.help_scroll as usize);
+                .print_help(&text, self.help_scroll as usize);
         } else {
             self.screen_writer.print(
                 &self.viewer,

@@ -8,6 +8,7 @@
 
 mod app;
 mod clipboard;
+mod config;
 mod document;
 mod edit;
 mod flatxml;
@@ -65,6 +66,26 @@ fn main() {
         return;
     }
 
+    // Loaded (and, on first run, written out) only for the interactive
+    // path — a keybinding typo shouldn't block `xless file.xml | ...`
+    // pipe usage, which never reads a keymap at all. Validated strictly
+    // and *before* the terminal goes into raw/alternate-screen mode
+    // (config::load_or_init never touches the terminal itself), so a bad
+    // config prints a normal, readable error and exits — the same
+    // contract malformed input XML already gets, rather than a cryptic
+    // half-drawn TUI or a silent fallback that leaves a remap looking
+    // like it just didn't work.
+    let keymap = match config::default_config_path() {
+        Some(path) => match config::load_or_init(&path) {
+            Ok(km) => km,
+            Err(err) => {
+                eprintln!("xless: {err}");
+                std::process::exit(1);
+            }
+        },
+        None => config::Keymap::default(),
+    };
+
     let dimensions = app::query_terminal_size().unwrap_or(TTYDimensions {
         width: 80,
         height: 24,
@@ -110,7 +131,7 @@ fn main() {
     let hidden = HideCursor::from(alt);
     let mouse = MouseTerminal::from(hidden);
 
-    let mut app = App::new(viewer, filename, file_path, mouse);
+    let mut app = App::new(viewer, filename, file_path, keymap, mouse);
     app.screen_writer.show_line_numbers = opt.show_line_numbers;
     app.screen_writer.show_relative_line_numbers = opt.show_relative_line_numbers;
     if let Some(msg) = focus_line_warning {
