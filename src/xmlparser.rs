@@ -2,7 +2,7 @@
 // (mirrors how jless's `jsonparser.rs` drives its `logos` lexer by hand —
 // see ~/git/jless/src/jsonparser.rs).
 //
-// Key departure from jless's parser (see docs/ARCHITECTURE.md §4/§8): we
+// Key departure from jless's parser (see README.md's Architecture section §4/§8): we
 // do NOT re-render a canonical pretty-printed string and point rows into
 // that. `quick-xml`'s `Reader::from_str` gives zero-copy events borrowing
 // directly from the input, so every `Row.range` is computed by pointer
@@ -11,7 +11,7 @@
 // memory strategy: nothing here allocates proportionally to the input
 // size except the row/attr vectors themselves.
 //
-// v1 scope (see docs/PLAN.md M0): single-pass, everything eagerly parsed
+// v1 scope (see README.md's Roadmap section M0): single-pass, everything eagerly parsed
 // (no phase-1/phase-2 lazy split yet — that's a fallback to reach for only
 // if benchmarking shows it's needed, per ARCHITECTURE.md §8.4). Well-formed
 // XML only; a parse error aborts with a message, same as jless does for

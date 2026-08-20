@@ -34,7 +34,8 @@ close/near-verbatim port of a specific jless source file say so in their
 own doc comment (e.g. `src/terminal.rs`, `src/input.rs`); modules that
 port jless's *algorithms* onto a new XML-shaped data model (e.g.
 `src/flatxml.rs`'s traversal methods, `src/viewer.rs`'s movement/scrolling
-logic) say so as well. See `docs/ARCHITECTURE.md` for the full account of
-what was studied and how each part of jless's design was reused, adapted,
-or deliberately diverged from for xless's requirements (large-file
-performance, standalone editing) — see docs/ARCHITECTURE.md §§1, 6, 8, 9.
+logic) say so as well. See README.md's Architecture section for the full
+account of what was studied and how each part of jless's design was
+reused, adapted, or deliberately diverged from for xless's requirements
+(large-file performance, standalone editing) — see README.md's
+Architecture section, §§1, 6, 8, 9.

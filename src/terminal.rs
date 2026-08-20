@@ -2,7 +2,7 @@
 // MIT licensed, Copyright (c) 2021 Paul Julius Martinez — see
 // THIRD_PARTY_NOTICES.md). This is a generic ANSI color/style/cursor
 // abstraction; it has no JSON-vs-XML-specific logic at all, which is
-// exactly why docs/ARCHITECTURE.md §6 classifies it as a "keep."
+// exactly why README.md's Architecture section §6 classifies it as a "keep."
 
 use std::fmt::{Result, Write};
 

@@ -1,5 +1,5 @@
 // Pairs a `FlatXml` with the source bytes its ranges point into. See
-// docs/ARCHITECTURE.md §8.1/§8.2: the source is mmap'd for real files
+// README.md's Architecture section §8.1/§8.2: the source is mmap'd for real files
 // (not copied into a `String`), and `FlatXml`'s `Row.range`s reference it
 // directly, so this is the one place that owns both and can hand out
 // `&str` slices safely.

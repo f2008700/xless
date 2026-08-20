@@ -655,7 +655,7 @@ fn build_keymap(raw: RawConfig) -> Result<Keymap, String> {
         let action = AppAction::from_name(name).ok_or_else(|| {
             format!(
                 "unknown action \"{name}\" under \"keys\" — see the generated default file \
-                 or docs/CONFIG.md for valid action names"
+                 or README.md's Keybinding configuration section for valid action names"
             )
         })?;
         keymap.actions.retain(|_, a| *a != action);
@@ -747,7 +747,8 @@ fn generate_default_config_text() -> String {
              a single character (\"j\"), a named key (Up/Down/Left/Right/Home/End/PageUp/ \
              PageDown/Backspace/Enter/Space/Tab), or Ctrl-<char> (\"Ctrl-d\"). Esc, Ctrl-c, and \
              the digits 0-9 (reserved for the count prefix, e.g. \"3j\") can't be rebound. \
-             Delete this file, or any entry in it, to fall back to the default. See docs/CONFIG.md."
+             Delete this file, or any entry in it, to fall back to the default. See README.md's \
+             Keybinding configuration section."
         )
         .unwrap()
     ));

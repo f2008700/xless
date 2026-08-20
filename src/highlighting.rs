@@ -1,7 +1,7 @@
 // Color palette for XML syntax elements. Structurally analogous to
 // jless's src/highlighting.rs, but the palette itself is new (tag/
 // attribute/text/comment/CData/PI/doctype instead of JSON's key/string/
-// number/boolean/null) — see docs/ARCHITECTURE.md §6.
+// number/boolean/null) — see README.md's Architecture section §6.
 //
 // v1 simplification vs. jless: one color per *row kind*, applied to the
 // whole rendered line, rather than jless's character-level highlighting

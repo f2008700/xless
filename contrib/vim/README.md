@@ -1,6 +1,7 @@
 # xless.vim
 
-The vim/neovim plugin described in [`docs/VIM_INTEGRATION.md`](../../docs/VIM_INTEGRATION.md).
+The vim/neovim plugin described in the [Vim integration](../../README.md#vim-integration)
+section of the main README.
 Provides `:Xless [file]`, which opens the current (or a given) file in
 `xless` in a terminal split, focused at your cursor's line.
 

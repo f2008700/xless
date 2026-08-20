@@ -2,7 +2,7 @@
 // (~/git/jless/src/search.rs) — forward/reverse, wraps around, expands
 // collapsed containers to reveal a match — but the mechanics differ
 // because there's no single canonical string to regex over here (see
-// docs/ARCHITECTURE.md §8.5, which flagged this as a "decide from
+// README.md's Architecture section §8.5, which flagged this as a "decide from
 // benchmarks" item). v1 takes the simplest correct option from that
 // section: match against each row's own text directly (tag name +
 // attributes for elements, content for text/comment/CData/PI), doing a

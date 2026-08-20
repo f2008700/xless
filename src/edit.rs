@@ -1,6 +1,6 @@
 // Editing: patch-based mutation of the document's byte buffer, full
 // re-parse on each committed edit, undo/redo, and save. See
-// docs/EDITING.md for the original design and docs/ARCHITECTURE.md §9 for
+// README.md's Editing model section for the original design and README.md's Architecture section §9 for
 // why xless has an editing mode at all (a deliberate divergence from
 // jless, which is read-only).
 //
@@ -19,7 +19,7 @@
 // is a perfectly reasonable interactive experience even on a 100-200MB
 // file (a ~1-2s pause after pressing Enter to confirm a change, not a
 // stall while typing). The subtree-scoped version remains a documented
-// follow-up (docs/PLAN.md M6), not a promise this code makes.
+// follow-up (README.md's Roadmap section M6), not a promise this code makes.
 //
 // Safety net used uniformly for every edit kind (rename, delete, insert,
 // text/attribute edit) instead of EDITING.md §5's original per-keystroke

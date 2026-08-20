@@ -1,6 +1,6 @@
 // Builds an XPath-flavored path to a row — the XML analog of jless's
 // `FlatJson::build_path_to_node` (~/git/jless/src/flatjson.rs), which
-// builds jq-style paths (`.foo[3].bar`). See docs/ARCHITECTURE.md §7.1:
+// builds jq-style paths (`.foo[3].bar`). See README.md's Architecture section §7.1:
 // XPath's sibling-position convention is 1-based and counts only
 // same-tag siblings (`item[2]` means "the 2nd `<item>` among its
 // siblings," not "the 2nd child overall"), which is different enough

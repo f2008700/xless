@@ -7,7 +7,7 @@
 // index rather than by walking a real tree), same traversal algorithms
 // (`next_visible_row`/`prev_visible_row` skip the body of collapsed
 // containers, `next_item`/`prev_item` additionally skip closing rows) —
-// adapted in two ways documented in docs/ARCHITECTURE.md:
+// adapted in two ways documented in README.md's Architecture section:
 //
 //   1. `Value` models XML's shape (elements w/ attributes, text, comments,
 //      CDATA, PIs, doctype) instead of JSON's (objects/arrays/primitives).
@@ -418,8 +418,8 @@ impl FlatXml {
 
     /// Finds the row whose range contains, or most closely follows, the
     /// given byte offset in the original source. Used for `--focus-line`
-    /// (docs/VIM_INTEGRATION.md) and, later, for the editing model's
-    /// smallest-enclosing-element lookup (docs/EDITING.md §3).
+    /// (README.md's Vim integration section) and, later, for the editing model's
+    /// smallest-enclosing-element lookup (README.md's Editing model section §3).
     ///
     /// Binary search over row start offsets, since rows are in source
     /// order — but a plain "floor" search (the last row starting at or

@@ -1,7 +1,7 @@
 // Navigation/collapse state machine. Adapted from jless's src/viewer.rs
 // (~/git/jless/src/viewer.rs, MIT — see THIRD_PARTY_NOTICES.md): the
 // `Action` enum and the movement/scrolling algorithms below are a close
-// port (docs/ARCHITECTURE.md §6 calls this an "adapt," not a "rewrite,"
+// port (README.md's Architecture section §6 calls this an "adapt," not a "rewrite,"
 // because the state machine itself is format-agnostic — only the
 // `FlatJson`→`FlatXml` swap is XML-specific).
 //
@@ -105,7 +105,7 @@ impl Viewer {
 
     /// Jump straight to (and expand every collapsed ancestor of) whichever
     /// row contains the given byte offset in the original source. Backs
-    /// `--focus-line`/`--focus-pos` (docs/VIM_INTEGRATION.md §2).
+    /// `--focus-line`/`--focus-pos` (README.md's Vim integration section §2).
     pub fn focus_source_offset(&mut self, offset: u32) {
         let row = self.doc.flat.row_at_source_offset(offset);
         self.focus_row_expanding_ancestors(row);

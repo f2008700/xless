@@ -1,5 +1,5 @@
 // Adapted from jless's src/options.rs. No --json/--yaml-style format
-// flags (xless only reads XML, per docs/ARCHITECTURE.md §4). The
+// flags (xless only reads XML, per README.md's Architecture section §4). The
 // --line-numbers/--relative-line-numbers pair mirrors jless's own
 // slightly unusual clap setup for getting both `--foo`/`--no-foo` to work
 // with sensible defaults — see jless's options.rs for the original
@@ -59,7 +59,7 @@ pub struct Opt {
 
     /// Focus the element containing this 1-based line number of the
     /// *original source file* on startup, expanding collapsed ancestors
-    /// as needed. See docs/VIM_INTEGRATION.md.
+    /// as needed. See README.md's Vim integration section.
     #[arg(long = "focus-line")]
     pub focus_line: Option<usize>,
 }

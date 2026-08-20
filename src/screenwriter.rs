@@ -97,7 +97,7 @@ impl<W: IoWrite> ScreenWriter<W> {
         // used to size off `content_height` (the terminal's visible row
         // count, typically a couple dozen) instead of `doc.flat.len()`
         // (the document's actual row count, which — per
-        // docs/ARCHITECTURE.md §8 — is exactly the number that scales to
+        // README.md's Architecture section §8 — is exactly the number that scales to
         // millions on a 100-200MB file). Every row's own number is the
         // *absolute* row index (`write_gutter` always shows it for the
         // focused row, and for every row when relative numbers are off),

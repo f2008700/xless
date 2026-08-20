@@ -1,10 +1,10 @@
 // Renders a single row's text content (no indentation — the caller adds
 // that based on `row.depth`) and the whole-document pretty-print used for
-// pipe/filter mode (see docs/VIM_INTEGRATION.md §1's `:r !xless %` /
+// pipe/filter mode (see README.md's Vim integration section §1's `:r !xless %` /
 // `xless file.xml | ...` recipes).
 //
 // v1 simplification vs. jless's src/lineprinter.rs (1984 lines): no
-// Line-vs-Compact mode distinction yet (docs/ARCHITECTURE.md §5's mode
+// Line-vs-Compact mode distinction yet (README.md's Architecture section §5's mode
 // table — always-shown attributes/close-tags, single-line collapsed
 // previews) and no horizontal truncation/scrolling for lines wider than
 // the terminal (jless's truncatedstrview.rs, ~1125 lines, deliberately
@@ -49,8 +49,8 @@ fn format_attrs(doc: &Document, attrs: &[Attr]) -> String {
 /// element renders as a single-line `<tag attrs>…</tag>` preview,
 /// computed in O(1) regardless of how large the collapsed subtree is —
 /// this matters at the 100-200MB scale just as much as it does for
-/// interactivity, see docs/ARCHITECTURE.md §8) and `mode`
-/// (docs/ARCHITECTURE.md §5, viewer.rs's module doc comment): in Compact
+/// interactivity, see README.md's Architecture section §8) and `mode`
+/// (README.md's Architecture section §5, viewer.rs's module doc comment): in Compact
 /// mode, an expanded element with no children renders as a self-closing
 /// `<tag/>` — its (never independently visible, in Compact mode) closing
 /// row is simply never asked to render. In Line mode it renders as a bare
@@ -153,7 +153,7 @@ fn write_full_fidelity_row(doc: &Document, i: Index, out: &mut String) {
 /// independent of any interactive view state — but note that jless's
 /// version *is* the parser's canonical output (rows point into it),
 /// whereas here it's purely a rendering pass over rows that point at the
-/// original source (see docs/ARCHITECTURE.md §8.2 for why).
+/// original source (see README.md's Architecture section §8.2 for why).
 pub fn pretty_printed(doc: &Document) -> String {
     let mut out = String::new();
     for i in 0..doc.flat.len() as Index {

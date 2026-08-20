@@ -1,5 +1,5 @@
 // Entry point. Mirrors jless's src/main.rs contract deliberately (see
-// docs/VIM_INTEGRATION.md §1): if stdout isn't a real terminal, just
+// README.md's Vim integration section §1): if stdout isn't a real terminal, just
 // pretty-print the parsed document and exit — this is what makes
 // `xless file.xml | ...`, `xless file.xml > out.xml`, and vim's
 // `:r !xless %` all work with no special-casing. Only when stdout *is* a
@@ -182,7 +182,7 @@ fn load_source(opt: &Opt) -> io::Result<(Source, String, Option<PathBuf>)> {
 }
 
 /// Converts a 1-based line number in the original source into a byte
-/// offset, for `--focus-line` (docs/VIM_INTEGRATION.md §2). Linear scan —
+/// offset, for `--focus-line` (README.md's Vim integration section §2). Linear scan —
 /// fine for a one-shot startup lookup even on a large file; this is not
 /// on any interactive hot path.
 fn byte_offset_of_line(source: &[u8], line: usize) -> Option<u32> {

@@ -4,7 +4,7 @@
 // handling (`dd`, `y<target>`), digit-count-prefixed movement, `:`
 // command mode, and mouse handling all mirror jless's interaction model;
 // the editing commands (i/r/o/O/p/P/u/Ctrl-r) are new, since jless has no
-// editing at all (docs/ARCHITECTURE.md §9).
+// editing at all (README.md's Architecture section §9).
 
 use std::io::Write as IoWrite;
 use std::path::PathBuf;
@@ -147,7 +147,7 @@ impl<W: IoWrite> App<W> {
                 .to_string(),
         );
         lines.push(format!(
-            "Settings file: {} — see docs/CONFIG.md",
+            "Settings file: {} — see README.md's Keybinding configuration section",
             config::default_config_path()
                 .map(|p| p.display().to_string())
                 .unwrap_or_else(|| "(unavailable — $HOME not set)".to_string())
