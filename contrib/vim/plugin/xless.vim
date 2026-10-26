@@ -62,7 +62,7 @@ function! xless#open(file) abort
     execute 'vertical terminal ' . l:cmd
   else
     " No :terminal support at all (very old vim) — fall back to
-    " suspend-and-run, still works per VIM_INTEGRATION.md §1.
+    " suspend-and-run, still works per README.md's Vim integration section, §1.
     execute '!' . l:cmd
   endif
 endfunction

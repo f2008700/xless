@@ -12,7 +12,7 @@
 // always skipped, matching jless's Data mode where "closing braces ...
 // are elided" unconditionally, not just when a container is empty).
 //
-// v1 simplification vs. ARCHITECTURE.md §5's original table: Line mode
+// v1 simplification vs. README.md's Architecture section §5's original table: Line mode
 // here does *not* put each attribute on its own physical line — doing
 // that would mean a single logical Row spans multiple *terminal* lines,
 // which breaks the one-row-one-line invariant screenwriter.rs (and this
@@ -105,7 +105,8 @@ impl Viewer {
 
     /// Jump straight to (and expand every collapsed ancestor of) whichever
     /// row contains the given byte offset in the original source. Backs
-    /// `--focus-line`/`--focus-pos` (README.md's Vim integration section §2).
+    /// `--focus-line` (README.md's Vim integration section §2) and post-edit
+    /// refocusing (edit.rs).
     pub fn focus_source_offset(&mut self, offset: u32) {
         let row = self.doc.flat.row_at_source_offset(offset);
         self.focus_row_expanding_ancestors(row);
@@ -118,7 +119,7 @@ impl Viewer {
     /// same "make it visible" treatment `--focus-line` does.
     pub fn focus_row_expanding_ancestors(&mut self, row: Index) {
         let mut ancestor = row;
-        while let OptionIndex::Index(parent) = self.doc.flat[ancestor].parent {
+        while let OptionIndex::Index(parent) = self.doc.flat[ancestor].parent() {
             if self.doc.flat[parent].is_collapsed() {
                 self.doc.flat.expand(parent);
             }
@@ -226,8 +227,11 @@ impl Viewer {
             Action::ToggleCollapsed => self.toggle_collapsed(),
             Action::CollapseNodeAndSiblings => self.set_collapse_state_on_node_and_siblings(true),
             Action::ExpandNodeAndSiblings => self.set_collapse_state_on_node_and_siblings(false),
-            Action::ToggleMode => self.mode = self.mode.toggled(),
-            Action::JumpTo(row) => self.focus_row_expanding_ancestors(row),
+            Action::ToggleMode => {
+                self.mode = self.mode.toggled();
+                self.focused_row = self.displayable_row(self.focused_row);
+            }
+            Action::JumpTo(row) => self.focus_row_expanding_ancestors(self.displayable_row(row)),
             Action::ResizeViewerDimensions(dims) => self.dimensions = dims,
         }
 
@@ -237,6 +241,19 @@ impl Viewer {
 
         if track_window {
             self.ensure_focused_row_is_visible();
+        }
+    }
+
+    /// `row`, or — in Compact mode, where closing tags are never displayed
+    /// or reachable by movement — its opening row. Guards the two ways the
+    /// cursor could otherwise land on an invisible row: jumping to a raw
+    /// row index (`42G` counts *all* rows) and switching from Line to
+    /// Compact while focused on a closing tag.
+    fn displayable_row(&self, row: Index) -> Index {
+        if self.mode == Mode::Compact && self.doc.flat[row].is_closing_of_container() {
+            self.doc.flat[row].pair_index().unwrap()
+        } else {
+            row
         }
     }
 
@@ -302,7 +319,7 @@ impl Viewer {
             return;
         }
         if row.is_opening_of_container() {
-            if let OptionIndex::Index(child) = row.first_child() {
+            if let OptionIndex::Index(child) = self.doc.flat.first_child(self.focused_row) {
                 self.focused_row = child;
             }
         } else {
@@ -326,7 +343,7 @@ impl Viewer {
     }
 
     fn focus_parent(&mut self) {
-        if let OptionIndex::Index(parent) = self.doc.flat[self.focused_row].parent {
+        if let OptionIndex::Index(parent) = self.doc.flat[self.focused_row].parent() {
             self.focused_row = parent;
         }
     }
@@ -336,7 +353,7 @@ impl Viewer {
             self.move_up(1);
             let mut row = &self.doc.flat[self.focused_row];
             while row.depth > self.desired_depth {
-                self.focused_row = row.parent.unwrap();
+                self.focused_row = row.parent().unwrap();
                 row = &self.doc.flat[self.focused_row];
             }
         }
@@ -355,9 +372,9 @@ impl Viewer {
     }
 
     fn focus_first_sibling(&mut self) {
-        match self.doc.flat[self.focused_row].parent {
+        match self.doc.flat[self.focused_row].parent() {
             OptionIndex::Index(parent) => {
-                if let OptionIndex::Index(first) = self.doc.flat[parent].first_child() {
+                if let OptionIndex::Index(first) = self.doc.flat.first_child(parent) {
                     self.focused_row = first;
                 }
             }
@@ -366,10 +383,10 @@ impl Viewer {
     }
 
     fn focus_last_sibling(&mut self) {
-        match self.doc.flat[self.focused_row].parent {
+        match self.doc.flat[self.focused_row].parent() {
             OptionIndex::Index(parent) => {
                 let close = self.doc.flat[parent].pair_index().unwrap();
-                if let OptionIndex::Index(last) = self.doc.flat[close].last_child() {
+                if let OptionIndex::Index(last) = self.doc.flat.last_child(close) {
                     self.focused_row = last;
                 }
             }
@@ -430,8 +447,8 @@ impl Viewer {
             self.focused_row = self.doc.flat[self.focused_row].pair_index().unwrap();
         }
 
-        let first_sibling = match self.doc.flat[self.focused_row].parent {
-            OptionIndex::Index(parent) => self.doc.flat[parent].first_child().to_option(),
+        let first_sibling = match self.doc.flat[self.focused_row].parent() {
+            OptionIndex::Index(parent) => self.doc.flat.first_child(parent).to_option(),
             OptionIndex::Nil => Some(0),
         };
 
@@ -444,7 +461,7 @@ impl Viewer {
                     self.doc.flat.expand(i);
                 }
             }
-            next = self.doc.flat[i].next_sibling.to_option();
+            next = self.doc.flat.next_sibling(i).to_option();
         }
 
         self.ensure_focused_row_is_visible();
@@ -455,8 +472,7 @@ impl Viewer {
         let max_focused_row = self.count_n_lines_past(
             self.top_row,
             (self
-                .dimensions
-                .height
+                .content_height()
                 .saturating_sub(self.scrolloff())
                 .saturating_sub(1)) as usize,
         );
@@ -526,11 +542,19 @@ impl Viewer {
             let opening = self.doc.flat[self.top_row].pair_index().unwrap();
             if self.doc.flat[opening].is_collapsed() {
                 self.top_row = opening;
+            } else if self.mode == Mode::Compact {
+                // After a Line→Compact toggle the window can start on a
+                // closing tag Compact mode never draws; start at the next
+                // displayed row instead (or the last one, at EOF).
+                self.top_row = match self.doc.flat.next_item(self.top_row) {
+                    OptionIndex::Index(next) => next,
+                    OptionIndex::Nil => self.doc.flat.last_visible_item(),
+                };
             }
         }
 
         let mut ancestor = self.top_row;
-        while let OptionIndex::Index(ancestor_index) = self.doc.flat[ancestor].parent {
+        while let OptionIndex::Index(ancestor_index) = self.doc.flat[ancestor].parent() {
             if self.doc.flat[ancestor_index].is_collapsed() {
                 self.top_row = ancestor_index;
             }
@@ -568,5 +592,73 @@ impl Viewer {
 
     pub fn index_of_focused_row_on_screen(&self) -> u16 {
         self.count_visible_rows_before(self.top_row, self.focused_row, self.content_height())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::document::Source;
+    use crate::xmlparser;
+
+    fn viewer(xml: &str, height: u16) -> Viewer {
+        let flat = xmlparser::parse(xml.as_bytes()).unwrap();
+        let doc = Document {
+            source: Source::Owned(xml.as_bytes().to_vec()),
+            flat,
+        };
+        let mut v = Viewer::new(doc, TTYDimensions { width: 80, height });
+        v.reserved_rows = 2;
+        v
+    }
+
+    // 0 r, 1 a, 2 x, 3 /a, 4 b, 5 y, 6 /b, 7 /r
+    const DOC: &str = "<r><a><x/></a><b><y/></b></r>";
+
+    #[test]
+    fn test_jump_to_closing_row_in_compact_mode_lands_on_opening() {
+        // Regression test: `4G` resolves to raw row index 3 (`</a>`),
+        // which Compact mode never displays.
+        let mut v = viewer(DOC, 24);
+        v.perform_action(Action::JumpTo(3));
+        assert_eq!(v.focused_row, 1);
+    }
+
+    #[test]
+    fn test_jump_to_closing_row_in_line_mode_is_allowed() {
+        let mut v = viewer(DOC, 24);
+        v.mode = Mode::Line;
+        v.perform_action(Action::JumpTo(3));
+        assert_eq!(v.focused_row, 3);
+    }
+
+    #[test]
+    fn test_toggling_to_compact_on_closing_row_moves_to_opening() {
+        let mut v = viewer(DOC, 24);
+        v.mode = Mode::Line;
+        v.perform_action(Action::JumpTo(6)); // </b>
+        v.perform_action(Action::ToggleMode);
+        assert_eq!(v.mode, Mode::Compact);
+        assert_eq!(v.focused_row, 4);
+        assert!(!v.doc.flat[v.top_row].is_closing_of_container());
+    }
+
+    #[test]
+    fn test_scroll_up_keeps_scrolloff_padding_at_bottom() {
+        // Regression test: scroll_up clamped the cursor against the full
+        // terminal height instead of the content rows, so with 2 chrome
+        // rows the cursor could sit 2 rows closer to the bottom edge than
+        // --scrolloff allows. 40 siblings, 12-row terminal → 10 content
+        // rows, scrolloff 3 → the cursor may be at content row 6 at most.
+        let xml = format!("<r>{}</r>", "<i/>".repeat(40));
+        let mut v = viewer(&xml, 12);
+        v.perform_action(Action::FocusBottom);
+        v.perform_action(Action::ScrollUp(20));
+        let on_screen = v.index_of_focused_row_on_screen();
+        let max = v.content_height() - v.scrolloff() - 1;
+        assert!(
+            on_screen <= max,
+            "focused row at content row {on_screen}, but scrolloff allows at most {max}"
+        );
     }
 }

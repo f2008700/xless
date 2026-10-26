@@ -49,7 +49,7 @@ impl Document {
     /// Same as `text`, but takes a plain `usize` byte range — for the
     /// editing code (edit.rs, app.rs), which works directly with the
     /// owned byte buffer (`Vec<u8>` is indexed by `usize`) rather than
-    /// with `FlatXml` row ranges (`u32`, per ARCHITECTURE.md §8.3).
+    /// with `FlatXml` row ranges (`u32`, per README.md's Architecture section §8.3).
     pub fn text_range(&self, range: Range<usize>) -> &str {
         std::str::from_utf8(&self.source[range])
             .expect("byte range was not valid UTF-8 — edit produced a bad split?")

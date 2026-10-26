@@ -3,9 +3,9 @@
 // SIGWINCH (terminal resize) signal pipe with `poll(2)` so the event loop
 // can react to resizes without a busy-wait. Generic terminal plumbing, no
 // XML-specific logic — README.md's Architecture section §6 classifies this as a
-// "keep" (adapt only in that we drop jless's `remap_dev_tty_to_stdin`,
-// which existed solely to make `rustyline` cooperate with piped stdin;
-// xless doesn't have a readline-based command mode yet — PLAN.md M2).
+// "keep". Always reads keys from fd 0: when the document itself was piped
+// in, main.rs first points fd 0 at /dev/tty (its `remap_dev_tty_to_stdin`,
+// same idea as jless's), so this module never sees the exhausted pipe.
 
 use signal_hook::consts::SIGWINCH;
 use signal_hook::low_level::pipe;

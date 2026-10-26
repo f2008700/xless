@@ -707,7 +707,8 @@ fn build_keymap(raw: RawConfig) -> Result<Keymap, String> {
 /// `~/.xless/settings.json` — chosen over an XDG-style
 /// `~/.config/xless/` path because that's literally what was asked for;
 /// `$HOME` (not a `dirs`-crate lookup) since xless already only targets
-/// Unix (ARCHITECTURE.md's termion dependency rules out Windows anyway).
+/// Unix (the termion dependency rules out Windows anyway — see README.md's
+/// Roadmap section, "Explicitly out of scope for v1").
 pub fn default_config_path() -> Option<PathBuf> {
     std::env::var_os("HOME").map(|home| Path::new(&home).join(".xless").join("settings.json"))
 }

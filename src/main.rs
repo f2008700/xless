@@ -62,8 +62,17 @@ fn main() {
     let doc = Document { source, flat };
 
     if !stdout_is_tty() {
-        print!("{}", lineprinter::pretty_printed(&doc));
-        return;
+        match lineprinter::write_pretty_printed(&doc, &mut io::stdout().lock()) {
+            Ok(()) => return,
+            // `xless big.xml | head`: the reader went away — that's a
+            // normal way for a pipeline to end, not an error (print! used
+            // to panic here).
+            Err(err) if err.kind() == io::ErrorKind::BrokenPipe => return,
+            Err(err) => {
+                eprintln!("xless: error writing output: {err}");
+                std::process::exit(1);
+            }
+        }
     }
 
     // Loaded (and, on first run, written out) only for the interactive
@@ -114,6 +123,19 @@ fn main() {
         }
     }
 
+    // When the document itself arrived on stdin (`cat f.xml | xless`),
+    // stdin is now an exhausted pipe — input.rs would read EOF from it on
+    // the very first poll and the event loop would end after one frame.
+    // Point fd 0 at the controlling terminal instead, so keystrokes come
+    // from where the user is actually typing (the same fix jless's
+    // `remap_dev_tty_to_stdin` applies).
+    if !stdin_is_tty() {
+        if let Err(err) = remap_dev_tty_to_stdin() {
+            eprintln!("xless: unable to read keyboard input from /dev/tty: {err}");
+            std::process::exit(1);
+        }
+    }
+
     let raw = match io::stdout().into_raw_mode() {
         Ok(r) => r,
         Err(err) => {
@@ -146,6 +168,18 @@ fn stdout_is_tty() -> bool {
 
 fn stdin_is_tty() -> bool {
     unsafe { libc::isatty(libc::STDIN_FILENO) != 0 }
+}
+
+fn remap_dev_tty_to_stdin() -> io::Result<()> {
+    use std::os::unix::io::AsRawFd;
+
+    let tty = File::open("/dev/tty")?;
+    // SAFETY: plain dup2 of a valid, open fd onto STDIN_FILENO; `tty` is
+    // dropped (closing its original fd) only after the duplicate exists.
+    if unsafe { libc::dup2(tty.as_raw_fd(), libc::STDIN_FILENO) } == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 fn load_source(opt: &Opt) -> io::Result<(Source, String, Option<PathBuf>)> {

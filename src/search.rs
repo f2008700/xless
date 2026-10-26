@@ -72,11 +72,13 @@ fn searchable_text(doc: &Document, row: Index) -> String {
             // not just the unquoted value.
             let mut s = doc.row_text(row).to_string();
             for a in doc.flat.attrs_of(row) {
+                let q = crate::lineprinter::attr_quote(doc, a);
                 s.push(' ');
                 s.push_str(doc.text(a.name.clone()));
-                s.push_str("=\"");
+                s.push('=');
+                s.push(q);
                 s.push_str(doc.text(a.value.clone()));
-                s.push('"');
+                s.push(q);
             }
             s
         }
@@ -107,11 +109,12 @@ impl SearchState {
     }
 
     /// Finds the next (or previous, depending on `direction`) matching
-    /// row after `from`, wrapping around the whole document. Never
-    /// returns `from` itself even if it matches (matches `n`/`N`'s "go to
-    /// the *next* one" semantics rather than re-confirming the current
-    /// position). Closing-tag rows are never match targets — their only
-    /// text is a tag name that's redundant with the opening row.
+    /// row after `from`, wrapping around the whole document. Prefers any
+    /// *other* match (`n`/`N`'s "go to the next one" semantics); returns
+    /// `from` itself only when it's the sole match — an earlier version
+    /// returned `None` then, so `n` on the only match in the document
+    /// reported "no matches". Closing-tag rows are never match targets —
+    /// their only text is a tag name that's redundant with the opening row.
     pub fn find(&self, doc: &Document, from: Index, direction: Direction) -> Option<Index> {
         let len = doc.flat.len() as Index;
         if len == 0 || self.regex.is_none() {
@@ -136,7 +139,9 @@ impl SearchState {
                 }
             };
             if i == from {
-                return None;
+                let only_match =
+                    !doc.flat[from].is_closing_of_container() && self.is_match(doc, from);
+                return only_match.then_some(from);
             }
             if !doc.flat[i].is_closing_of_container() && self.is_match(doc, i) {
                 return Some(i);
@@ -187,6 +192,28 @@ mod tests {
         let last = d.flat.len() as Index - 1;
         let m = s.find(&d, last, Direction::Reverse).unwrap();
         assert_eq!(d.row_text(m), "needle2");
+    }
+
+    #[test]
+    fn test_find_from_the_only_match_returns_it() {
+        // Regression test: `n` on the document's only match used to
+        // report "no matches".
+        let d = doc("<root><a>needle</a><b>hay</b></root>");
+        let mut s = SearchState::default();
+        s.set_term("needle".to_string(), Direction::Forward)
+            .unwrap();
+        let m = s.find(&d, 0, Direction::Forward).unwrap();
+        assert_eq!(s.find(&d, m, Direction::Forward), Some(m));
+        assert_eq!(s.find(&d, m, Direction::Reverse), Some(m));
+    }
+
+    #[test]
+    fn test_find_with_no_match_anywhere_is_none() {
+        let d = doc("<root><a>hay</a></root>");
+        let mut s = SearchState::default();
+        s.set_term("needle".to_string(), Direction::Forward)
+            .unwrap();
+        assert_eq!(s.find(&d, 0, Direction::Forward), None);
     }
 
     #[test]

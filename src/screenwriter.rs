@@ -16,7 +16,6 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use crate::flatxml::{Index, OptionIndex};
 use crate::highlighting;
 use crate::lineprinter;
-use crate::path;
 use crate::search::SearchState;
 use crate::terminal::{AnsiTerminal, Style, Terminal};
 use crate::types::TTYDimensions;
@@ -73,14 +72,14 @@ impl<W: IoWrite> ScreenWriter<W> {
         dirty: bool,
         search: &SearchState,
         message: &Option<String>,
-        path_style: path::PathStyle,
+        header: &str,
     ) {
         let doc = &viewer.doc;
 
         self.terminal.output.clear();
         let _ = self.terminal.clear_screen();
 
-        self.print_header_into_buffer(viewer, path_style);
+        self.print_header_into_buffer(header);
 
         let content_height = self
             .dimensions
@@ -177,8 +176,8 @@ impl<W: IoWrite> ScreenWriter<W> {
         let _ = self.terminal.reset_style();
     }
 
-    /// Row 1: the focused node's path (`path::build_path`, in whichever
-    /// of the two flavors `style` picks — see `path::PathStyle`), so
+    /// Row 1: the focused node's path (built by app.rs through its
+    /// `path::PathCache`, in whichever `path::PathStyle` is selected), so
     /// it's always visible which element you're looking at without
     /// having to yank it or count indentation — a user asked for exactly
     /// this after noticing `yx` already computed the XPath flavor on
@@ -189,13 +188,12 @@ impl<W: IoWrite> ScreenWriter<W> {
     /// status bar's inverted style, but a dedicated color instead of
     /// inverted so it's visually distinguishable from the status bar
     /// rather than looking like a second copy of it.
-    fn print_header_into_buffer(&mut self, viewer: &Viewer, style: path::PathStyle) {
+    fn print_header_into_buffer(&mut self, path_text: &str) {
         let _ = self.terminal.position_cursor(1, 1);
         let _ = self.terminal.clear_line();
 
-        let path_text = path::build_path(&viewer.doc, viewer.focused_row, style);
         let width = self.dimensions.width as usize;
-        let text = truncate_to_width(&path_text, width);
+        let text = truncate_to_width(path_text, width);
 
         let mut term_style = Style::default();
         term_style.fg = highlighting::HEADER_FG;
@@ -268,7 +266,8 @@ impl<W: IoWrite> ScreenWriter<W> {
     /// Full-screen keyboard-reference overlay for `:h`/`:help` (app.rs's
     /// `HELP_TEXT`) — replaces the document view for one frame. It's a
     /// small pager in its own right (app.rs's `handle_help_key` scrolls
-    /// it with j/k/arrows/Ctrl-d/Ctrl-u/g/G, closes it with q/Esc): an
+    /// it with the configured movement/page keys or arrows, closes it with
+    /// the quit key or Esc): an
     /// earlier version had no `scroll` parameter and just truncated
     /// anything past the first screen, which made most of the reference
     /// unreachable on a normal-sized terminal — found immediately by a
@@ -295,7 +294,7 @@ impl<W: IoWrite> ScreenWriter<W> {
         let _ = self.terminal.set_style(&style);
         let last_shown = (scroll + content_height as usize).min(lines.len());
         let footer = format!(
-            "lines {}-{} of {}   j/k/arrows/Ctrl-d/Ctrl-u scroll, g/G top/bottom, q/Esc close",
+            "lines {}-{} of {}   movement/page keys or arrows scroll, quit key or Esc closes",
             (scroll + 1).min(lines.len()),
             last_shown,
             lines.len()

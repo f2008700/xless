@@ -13,7 +13,7 @@
 //
 // v1 scope (see README.md's Roadmap section M0): single-pass, everything eagerly parsed
 // (no phase-1/phase-2 lazy split yet — that's a fallback to reach for only
-// if benchmarking shows it's needed, per ARCHITECTURE.md §8.4). Well-formed
+// if benchmarking shows it's needed, per README.md's Architecture section §8.4). Well-formed
 // XML only; a parse error aborts with a message, same as jless does for
 // malformed JSON/YAML.
 
@@ -33,8 +33,8 @@ pub fn parse(source: &[u8]) -> Result<FlatXml, String> {
         rows: Vec::new(),
         attrs: Vec::new(),
         open_stack: Vec::new(),
-        level_last_sibling: vec![OptionIndex::Nil],
         level_child_count: vec![0],
+        space_preserve: Vec::new(),
         top_level_elements: 0,
     };
 
@@ -44,18 +44,20 @@ pub fn parse(source: &[u8]) -> Result<FlatXml, String> {
     loop {
         match reader.read_event() {
             Ok(Event::Eof) => break,
-            Ok(Event::Start(e)) => parser.open_element(&e)?,
+            Ok(Event::Start(e)) => parser.open_element(&e, source)?,
             Ok(Event::Empty(e)) => parser.empty_element(&e)?,
             Ok(Event::End(e)) => parser.close_element(&e)?,
             Ok(Event::Text(e)) => {
-                if !e.iter().all(u8::is_ascii_whitespace) {
+                if parser.preserving_space() || !e.iter().all(u8::is_ascii_whitespace) {
                     validate_references(&e)?;
                     validate_no_cdata_terminator(&e)?;
                     parser.push_leaf(Value::Text, &e);
                 }
-                // Whitespace-only text nodes are dropped by default — see
-                // ARCHITECTURE.md §3. A --show-whitespace flag to keep
-                // them is deferred (PLAN.md notes this as a later flag).
+                // Whitespace-only text nodes are dropped, except inside an
+                // `xml:space="preserve"` scope, where whitespace is
+                // declared significant — see README.md's Architecture
+                // section §3. A --show-whitespace flag to keep them
+                // everywhere is deferred (README.md's Roadmap section).
             }
             Ok(Event::CData(e)) => parser.push_leaf(Value::CData, &e),
             Ok(Event::Comment(e)) => parser.push_leaf(Value::Comment, &e),
@@ -103,14 +105,16 @@ struct Parser {
     // Stack of currently-open element row indices; len() == current depth.
     open_stack: Vec<Index>,
     // One entry per current level (index 0 = top level, further entries
-    // pushed/popped alongside open_stack): the last sibling row index
-    // registered so far at that level, used to link prev/next_sibling and
-    // to detect "this is the first child" (to set the parent's
-    // first_child). See flatxml.rs's module doc comment for why close
-    // rows are *not* registered here (they occupy the same sibling slot
-    // as their matching open row from the parent's point of view).
-    level_last_sibling: Vec<OptionIndex>,
+    // pushed/popped alongside open_stack): how many children have been
+    // registered at that level so far, for `Row.index_in_parent`. (Sibling
+    // and first/last-child links aren't stored at all — `FlatXml` derives
+    // them from row order; see `Row`'s doc comment.) Close rows aren't
+    // counted: they occupy the same sibling slot as their opening row.
     level_child_count: Vec<u32>,
+    // Parallel to open_stack: whether each open element is inside an
+    // `xml:space="preserve"` scope (set by its own attribute, or inherited
+    // from its parent; `xml:space="default"` turns it back off).
+    space_preserve: Vec<bool>,
 
     // Count of elements (Start/Empty) seen at depth 0 — must end at
     // exactly 1 for a well-formed document (a single root element; the
@@ -129,6 +133,26 @@ struct Parser {
 impl Parser {
     fn depth(&self) -> u32 {
         self.open_stack.len() as u32
+    }
+
+    fn preserving_space(&self) -> bool {
+        self.space_preserve.last().copied().unwrap_or(false)
+    }
+
+    /// The `xml:space` scope a just-opened element establishes for its
+    /// content, given its attribute side-table range.
+    fn space_preserve_for(&self, attrs: &Range<u32>, source: &[u8]) -> bool {
+        let slice = |r: &Range<u32>| &source[r.start as usize..r.end as usize];
+        for a in &self.attrs[attrs.start as usize..attrs.end as usize] {
+            if slice(&a.name) == b"xml:space" {
+                match slice(&a.value) {
+                    b"preserve" => return true,
+                    b"default" => return false,
+                    _ => {}
+                }
+            }
+        }
+        self.preserving_space()
     }
 
     fn parent(&self) -> OptionIndex {
@@ -169,46 +193,18 @@ impl Parser {
         }
     }
 
-    /// Registers `new_index` (already pushed onto `self.rows`) as the next
-    /// sibling at the current level, and — if it's the first row at this
-    /// level — records it as its parent's `first_child`.
-    fn link_sibling(&mut self, new_index: Index) {
-        let level = self.level_last_sibling.len() - 1;
-        let prev = self.level_last_sibling[level];
-
-        self.rows[new_index as usize].prev_sibling = prev;
-        if let OptionIndex::Index(p) = prev {
-            self.rows[p as usize].next_sibling = OptionIndex::Index(new_index);
-        }
-
-        self.rows[new_index as usize].index_in_parent = self.level_child_count[level];
-        self.level_child_count[level] += 1;
-        self.level_last_sibling[level] = OptionIndex::Index(new_index);
-
-        if self.level_child_count[level] == 1 {
-            if let Some(&parent) = self.open_stack.last() {
-                if let Value::OpenElement { first_child, .. } =
-                    &mut self.rows[parent as usize].value
-                {
-                    *first_child = OptionIndex::Index(new_index);
-                }
-            }
-        }
+    /// The next `index_in_parent` at the current level.
+    fn next_child_slot(&mut self) -> u32 {
+        let count = self.level_child_count.last_mut().unwrap();
+        *count += 1;
+        *count - 1
     }
 
     fn push_leaf<T: std::ops::Deref<Target = [u8]>>(&mut self, value: Value, event: &T) {
         let range = self.offset(event);
-        let new_index = self.rows.len() as Index;
-        self.rows.push(Row {
-            parent: self.parent(),
-            prev_sibling: OptionIndex::Nil,
-            next_sibling: OptionIndex::Nil,
-            depth: self.depth(),
-            index_in_parent: 0,
-            range,
-            value,
-        });
-        self.link_sibling(new_index);
+        let slot = self.next_child_slot();
+        self.rows
+            .push(Row::new(self.parent(), self.depth(), slot, range, value));
     }
 
     fn parse_attrs(&mut self, e: &BytesStart) -> Result<Range<u32>, String> {
@@ -225,34 +221,33 @@ impl Parser {
         Ok(start..end)
     }
 
-    fn open_element(&mut self, e: &BytesStart) -> Result<(), String> {
+    fn open_element(&mut self, e: &BytesStart, source: &[u8]) -> Result<(), String> {
         let range = self.offset(e.name().as_ref());
         let attrs = self.parse_attrs(e)?;
+        let attrs_range = attrs.clone();
 
         if self.open_stack.is_empty() {
             self.top_level_elements += 1;
         }
 
         let new_index = self.rows.len() as Index;
-        self.rows.push(Row {
-            parent: self.parent(),
-            prev_sibling: OptionIndex::Nil,
-            next_sibling: OptionIndex::Nil,
-            depth: self.depth(),
-            index_in_parent: 0,
+        let slot = self.next_child_slot();
+        self.rows.push(Row::new(
+            self.parent(),
+            self.depth(),
+            slot,
             range,
-            value: Value::OpenElement {
+            Value::OpenElement {
                 collapsed: false,
                 attrs,
-                first_child: OptionIndex::Nil,
                 close_index: NIL,
             },
-        });
-        self.link_sibling(new_index);
+        ));
 
+        let preserve = self.space_preserve_for(&attrs_range, source);
         self.open_stack.push(new_index);
-        self.level_last_sibling.push(OptionIndex::Nil);
         self.level_child_count.push(0);
+        self.space_preserve.push(preserve);
 
         Ok(())
     }
@@ -265,17 +260,14 @@ impl Parser {
             self.top_level_elements += 1;
         }
 
-        let new_index = self.rows.len() as Index;
-        self.rows.push(Row {
-            parent: self.parent(),
-            prev_sibling: OptionIndex::Nil,
-            next_sibling: OptionIndex::Nil,
-            depth: self.depth(),
-            index_in_parent: 0,
+        let slot = self.next_child_slot();
+        self.rows.push(Row::new(
+            self.parent(),
+            self.depth(),
+            slot,
             range,
-            value: Value::EmptyElement { attrs },
-        });
-        self.link_sibling(new_index);
+            Value::EmptyElement { attrs },
+        ));
 
         Ok(())
     }
@@ -285,28 +277,25 @@ impl Parser {
             .open_stack
             .pop()
             .ok_or_else(|| "unmatched closing tag".to_string())?;
-        let last_child = self.level_last_sibling.pop().unwrap();
         self.level_child_count.pop();
+        self.space_preserve.pop();
 
         let range = self.offset(e.name().as_ref());
-        let parent = self.rows[open_index as usize].parent;
+        let parent = self.rows[open_index as usize].parent();
         let depth = self.rows[open_index as usize].depth;
         let index_in_parent = self.rows[open_index as usize].index_in_parent;
 
         let close_index = self.rows.len() as Index;
-        self.rows.push(Row {
+        self.rows.push(Row::new(
             parent,
-            prev_sibling: OptionIndex::Nil,
-            next_sibling: OptionIndex::Nil,
             depth,
             index_in_parent,
             range,
-            value: Value::CloseElement {
+            Value::CloseElement {
                 collapsed: false,
-                last_child,
                 open_index,
             },
-        });
+        ));
 
         if let Value::OpenElement {
             close_index: ci, ..
@@ -441,6 +430,28 @@ mod tests {
         let fj = parse(b"<root>\n  <a/>\n</root>").unwrap();
         // root-open, a-empty, root-close: whitespace text nodes dropped.
         assert_eq!(fj.len(), 3);
+    }
+
+    #[test]
+    fn test_whitespace_kept_inside_xml_space_preserve() {
+        let src = b"<root><p xml:space=\"preserve\">  <q> </q></p><r> </r></root>";
+        let fj = parse(src).unwrap();
+        let texts: Vec<&[u8]> = fj
+            .rows
+            .iter()
+            .filter(|r| matches!(r.value, Value::Text))
+            .map(|r| &src[r.range.start as usize..r.range.end as usize])
+            .collect();
+        // Both whitespace nodes inside <p> (including the one in <q>,
+        // which inherits the scope) are kept; the one in <r> isn't.
+        assert_eq!(texts, vec![b"  ".as_slice(), b" ".as_slice()]);
+    }
+
+    #[test]
+    fn test_xml_space_default_turns_preservation_back_off() {
+        let fj =
+            parse(b"<root xml:space=\"preserve\"><a xml:space=\"default\"> </a></root>").unwrap();
+        assert!(!fj.rows.iter().any(|r| matches!(r.value, Value::Text)));
     }
 
     #[test]

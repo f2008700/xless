@@ -11,12 +11,12 @@
 //
 //   1. `Value` models XML's shape (elements w/ attributes, text, comments,
 //      CDATA, PIs, doctype) instead of JSON's (objects/arrays/primitives).
-//      Attributes are *not* separate rows — see ARCHITECTURE.md §3 — they
+//      Attributes are *not* separate rows — see README.md's Architecture section §3 — they
 //      live in a side table (`FlatXml::attrs`) referenced by a `Range<u32>`
 //      on the owning element.
 //   2. Indices and byte ranges are `u32`, not `usize`/`Range<usize>`, and
 //      `Row.range` points into the *original* source bytes, not a second
-//      regenerated pretty-printed string — see ARCHITECTURE.md §8 (this is
+//      regenerated pretty-printed string — see README.md's Architecture section §8 (this is
 //      the large-file, 100-200MB-target memory optimization).
 
 use std::ops::Range;
@@ -73,7 +73,7 @@ impl From<Index> for OptionIndex {
 /// One attribute on an element: `name="value"`. `value` is the *raw* (still
 /// XML-escaped, unquoted) byte range of the value in the source — rendering
 /// decides how to display it, we don't unescape at parse time (see
-/// ARCHITECTURE.md §4 on keeping search/yank/rendering working on exactly
+/// README.md's Architecture section §4 on keeping search/yank/rendering working on exactly
 /// the text the user wrote).
 #[derive(Clone, Debug)]
 pub struct Attr {
@@ -102,27 +102,19 @@ pub enum Value {
 
     /// `<tag attr="value">` — `Row.range` is just the tag name.
     ///
-    /// `first_child` is `OptionIndex::Nil`, not just "an unused sentinel,"
-    /// for elements like `<a></a>` that have an open/close pair but no
-    /// content between them — unlike jless, whose parser fuses that case
-    /// into a separate `EmptyObject`/`EmptyArray` primitive so a real
-    /// `OpenContainer` is guaranteed non-empty, xless's parser only does
-    /// that fusion for the syntactically-explicit `<a/>` form (see
-    /// `Value::EmptyElement` and xmlparser.rs's module doc comment), so
-    /// this field genuinely needs to distinguish "no child yet" from "has
-    /// a child at index N."
+    /// No `first_child` field: a subtree is always the contiguous row
+    /// slice `open..=close`, so the first child (if any) is simply the next
+    /// row — see `FlatXml::first_child`. `<a></a>` (an open/close pair with
+    /// nothing between, which xless doesn't fuse into `EmptyElement` the
+    /// way jless fuses empty containers) is the `close_index == open + 1`
+    /// case.
     OpenElement {
         collapsed: bool,
         attrs: Range<u32>,
-        first_child: OptionIndex,
         close_index: Index,
     },
     /// `</tag>` — `Row.range` is just the tag name.
-    CloseElement {
-        collapsed: bool,
-        last_child: OptionIndex,
-        open_index: Index,
-    },
+    CloseElement { collapsed: bool, open_index: Index },
 }
 
 impl Value {
@@ -174,20 +166,6 @@ impl Value {
         self.set_collapsed(!self.is_collapsed())
     }
 
-    fn first_child(&self) -> OptionIndex {
-        match self {
-            Value::OpenElement { first_child, .. } => *first_child,
-            _ => OptionIndex::Nil,
-        }
-    }
-
-    fn last_child(&self) -> OptionIndex {
-        match self {
-            Value::CloseElement { last_child, .. } => *last_child,
-            _ => OptionIndex::Nil,
-        }
-    }
-
     fn pair_index(&self) -> OptionIndex {
         match self {
             Value::OpenElement { close_index, .. } => OptionIndex::Index(*close_index),
@@ -197,11 +175,18 @@ impl Value {
     }
 }
 
+/// One row is 36 bytes. At 100–200MB inputs there are ~10–20M of these,
+/// so every field counts: an earlier layout stored `prev_sibling`,
+/// `next_sibling`, `first_child` and `last_child` as `OptionIndex` (an
+/// 8-byte enum) — 64 bytes per row, ~0.9GB of index for a 150MB file.
+/// All four are derivable in O(1) from the source-order, contiguous-
+/// subtree layout (see `FlatXml::{prev_sibling, next_sibling,
+/// first_child, last_child}`), and `parent` is stored as a raw `Index`
+/// with `NIL` instead of an `OptionIndex`.
 #[derive(Debug)]
 pub struct Row {
-    pub parent: OptionIndex,
-    pub prev_sibling: OptionIndex,
-    pub next_sibling: OptionIndex,
+    /// `NIL` at top level — read it through `Row::parent()`.
+    parent: Index,
 
     pub depth: u32,
     pub index_in_parent: u32,
@@ -215,6 +200,29 @@ pub struct Row {
 }
 
 impl Row {
+    pub fn new(
+        parent: OptionIndex,
+        depth: u32,
+        index_in_parent: u32,
+        range: Range<u32>,
+        value: Value,
+    ) -> Row {
+        Row {
+            parent: match parent {
+                OptionIndex::Index(p) => p,
+                OptionIndex::Nil => NIL,
+            },
+            depth,
+            index_in_parent,
+            range,
+            value,
+        }
+    }
+
+    pub fn parent(&self) -> OptionIndex {
+        OptionIndex::from(self.parent)
+    }
+
     pub fn is_primitive(&self) -> bool {
         self.value.is_primitive()
     }
@@ -244,12 +252,6 @@ impl Row {
         self.value.toggle_collapsed();
     }
 
-    pub fn first_child(&self) -> OptionIndex {
-        self.value.first_child()
-    }
-    pub fn last_child(&self) -> OptionIndex {
-        self.value.last_child()
-    }
     pub fn pair_index(&self) -> OptionIndex {
         self.value.pair_index()
     }
@@ -260,7 +262,7 @@ impl Row {
 /// rows reference into. Does *not* own the source bytes — see
 /// `crate::document::Document`, which pairs a `FlatXml` with the mmap'd or
 /// owned buffer its ranges point into.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct FlatXml {
     pub rows: Vec<Row>,
     pub attrs: Vec<Attr>,
@@ -297,6 +299,69 @@ impl FlatXml {
         match self[index].value.attrs() {
             Some(r) => &self.attrs[r.start as usize..r.end as usize],
             None => &[],
+        }
+    }
+
+    /// First child of an opening row — the very next row, unless that's
+    /// its own closing row (no children). `Nil` for anything else.
+    pub fn first_child(&self, index: Index) -> OptionIndex {
+        match self[index].value {
+            Value::OpenElement { close_index, .. } if close_index > index + 1 => {
+                OptionIndex::Index(index + 1)
+            }
+            _ => OptionIndex::Nil,
+        }
+    }
+
+    /// Last child of a closing row: the row just before it, normalized to
+    /// its opening row if it's itself a closing tag. `Nil` for anything
+    /// else, or an element with no children.
+    pub fn last_child(&self, index: Index) -> OptionIndex {
+        match self[index].value {
+            Value::CloseElement { open_index, .. } if index > open_index + 1 => {
+                self.node_start(index - 1)
+            }
+            _ => OptionIndex::Nil,
+        }
+    }
+
+    /// Previous sibling of a node (closing rows aren't sibling-linked:
+    /// `Nil`). The row before a node is either its parent's opening row
+    /// (it's a first child), or the last row of its previous sibling —
+    /// that sibling itself, or that sibling's closing tag.
+    #[allow(dead_code)] // part of the link API; current callers only walk forward
+    pub fn prev_sibling(&self, index: Index) -> OptionIndex {
+        if index == 0 || self[index].is_closing_of_container() {
+            return OptionIndex::Nil;
+        }
+        if self[index - 1].is_opening_of_container() {
+            return OptionIndex::Nil;
+        }
+        self.node_start(index - 1)
+    }
+
+    /// Next sibling of a node (`Nil` for closing rows). The row after a
+    /// node's last row is either its parent's closing tag (it's a last
+    /// child), the end of the document, or the next sibling.
+    pub fn next_sibling(&self, index: Index) -> OptionIndex {
+        let last = match self[index].value {
+            Value::CloseElement { .. } => return OptionIndex::Nil,
+            Value::OpenElement { close_index, .. } => close_index,
+            _ => index,
+        };
+        let next = last + 1;
+        if next as usize >= self.rows.len() || self[next].is_closing_of_container() {
+            OptionIndex::Nil
+        } else {
+            OptionIndex::Index(next)
+        }
+    }
+
+    /// The node a row belongs to: a closing row's opening row, else itself.
+    fn node_start(&self, index: Index) -> OptionIndex {
+        match self[index].value {
+            Value::CloseElement { open_index, .. } => OptionIndex::Index(open_index),
+            _ => OptionIndex::Index(index),
         }
     }
 
@@ -407,7 +472,7 @@ impl FlatXml {
     #[allow(dead_code)]
     pub fn first_visible_ancestor(&self, mut index: Index) -> Index {
         let mut visible_ancestor = index;
-        while let OptionIndex::Index(parent) = self[index].parent {
+        while let OptionIndex::Index(parent) = self[index].parent() {
             if self[parent].is_collapsed() {
                 visible_ancestor = parent;
             }
@@ -488,6 +553,78 @@ mod tests {
         assert_eq!(
             tag, b"c",
             "expected offset in line 4's indentation to resolve to <c>, not <b>"
+        );
+    }
+
+    #[test]
+    fn test_derived_links_match_brute_force() {
+        // prev/next sibling and first/last child aren't stored — they're
+        // derived from row order (see `Row`). Check them against a
+        // brute-force reference built from `parent()` alone, on shapes
+        // that exercise every edge: mixed content, `<a></a>` (open/close
+        // with no children), deep nesting, prolog/epilog siblings of the
+        // root.
+        for xml in [
+            SIMPLE,
+            "<p>Hello <b>world</b>!<i/></p>",
+            "<?xml version=\"1.0\"?><!--c--><r><a></a><b><c><d/></c></b>t</r><!--e--><?pi x?>",
+            "<r><a><b><c><d>deep</d></c></b></a><e></e></r>",
+        ] {
+            let fj = parse(xml);
+            let n = fj.len() as Index;
+            let children = |p: OptionIndex| -> Vec<Index> {
+                (0..n)
+                    .filter(|&i| fj[i].parent() == p && !fj[i].is_closing_of_container())
+                    .collect()
+            };
+            for i in 0..n {
+                let row = &fj[i];
+                if row.is_closing_of_container() {
+                    assert_eq!(fj.prev_sibling(i), OptionIndex::Nil, "{xml} row {i}");
+                    assert_eq!(fj.next_sibling(i), OptionIndex::Nil, "{xml} row {i}");
+                    let kids = children(row.pair_index());
+                    let expect = kids
+                        .last()
+                        .map_or(OptionIndex::Nil, |&k| OptionIndex::Index(k));
+                    assert_eq!(fj.last_child(i), expect, "{xml} last_child of {i}");
+                    continue;
+                }
+                let sibs = children(row.parent());
+                let pos = sibs.iter().position(|&s| s == i).unwrap();
+                assert_eq!(
+                    row.index_in_parent as usize, pos,
+                    "{xml} index_in_parent {i}"
+                );
+                let prev = if pos == 0 {
+                    OptionIndex::Nil
+                } else {
+                    OptionIndex::Index(sibs[pos - 1])
+                };
+                let next = sibs
+                    .get(pos + 1)
+                    .map_or(OptionIndex::Nil, |&s| OptionIndex::Index(s));
+                assert_eq!(fj.prev_sibling(i), prev, "{xml} prev_sibling {i}");
+                assert_eq!(fj.next_sibling(i), next, "{xml} next_sibling {i}");
+                let first = if row.is_opening_of_container() {
+                    children(OptionIndex::Index(i))
+                        .first()
+                        .map_or(OptionIndex::Nil, |&k| OptionIndex::Index(k))
+                } else {
+                    OptionIndex::Nil
+                };
+                assert_eq!(fj.first_child(i), first, "{xml} first_child {i}");
+            }
+        }
+    }
+
+    #[test]
+    fn test_row_is_compact() {
+        // The row index dominates memory on large files (~14M rows for
+        // 150MB of typical XML) — guard against accidental growth.
+        assert!(
+            std::mem::size_of::<Row>() <= 36,
+            "Row is {} bytes",
+            std::mem::size_of::<Row>()
         );
     }
 

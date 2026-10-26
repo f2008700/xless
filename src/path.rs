@@ -4,9 +4,9 @@
 // XPath's sibling-position convention is 1-based and counts only
 // same-tag siblings (`item[2]` means "the 2nd `<item>` among its
 // siblings," not "the 2nd child overall"), which is different enough
-// from jless's all-siblings `index_in_parent` that this is computed
-// fresh here by walking `prev_sibling` and comparing tag text, rather
-// than reusing `Row.index_in_parent`.
+// from jless's all-siblings `index_in_parent` that it's computed per
+// parent by `PathCache` (one pass over that parent's children, then
+// memoized) rather than stored on every `Row`.
 //
 // v1 simplification: this always includes the `[n]` predicate, even when
 // an element has no same-tag siblings (where strict "shortest unambiguous
@@ -14,11 +14,13 @@
 // unambiguous, and matches what e.g. browser devtools' "Copy XPath"
 // produces — a convenience path for humans/copy-paste, not a spec-minimal
 // XPath compiler. Attributes aren't reachable (no `@name` segments)
-// because attributes aren't individually focusable yet (ARCHITECTURE.md
-// §7.2/§7.3).
+// because attributes aren't individually focusable yet (README.md's
+// Architecture section §7.2/§7.3).
+
+use std::collections::HashMap;
 
 use crate::document::Document;
-use crate::flatxml::{Index, OptionIndex, Value};
+use crate::flatxml::{Index, OptionIndex, Value, NIL};
 
 /// Which of the two path flavors below to show — the header bar's
 /// toggle (app.rs's `X` key) between `build_xpath`'s formal
@@ -51,10 +53,162 @@ impl PathStyle {
 /// rejects, since it isn't addressable in real XPath) still gets a
 /// displayable string, by falling back to showing `build_xpath`'s error
 /// message in parens rather than nothing at all.
+#[allow(dead_code)] // the header uses `PathCache::build_path`; kept for one-off callers
 pub fn build_path(doc: &Document, index: Index, style: PathStyle) -> String {
-    match style {
-        PathStyle::XPath => build_xpath(doc, index).unwrap_or_else(|e| format!("({e})")),
-        PathStyle::Literal => build_literal_path(doc, index),
+    PathCache::default().build_path(doc, index, style)
+}
+
+/// Same-tag sibling positions for one parent's children, computed in a
+/// single pass over that parent's child list.
+struct SiblingTable {
+    /// 1-based same-tag position, indexed by `Row.index_in_parent`
+    /// (0 for non-element children, which never need one).
+    positions: Vec<u32>,
+    /// How many children carry each tag name.
+    totals: HashMap<String, u32>,
+}
+
+/// Memoizes `SiblingTable`s per parent so building a path is O(depth)
+/// rather than O(depth × siblings). That matters because the header bar
+/// rebuilds the focused node's path on *every* redraw: without the cache,
+/// a node near the end of a million-sibling list re-walked every
+/// preceding sibling each frame (measured at ~12–72ms per keypress).
+/// Tables are built lazily, only for parents actually on a path that's
+/// been asked for, and must be discarded (`clear`) whenever the document
+/// changes — row indices and tag names are only stable between edits.
+#[derive(Default)]
+pub struct PathCache {
+    // Keyed by parent row index; `NIL` stands for the document's top level.
+    tables: HashMap<Index, SiblingTable>,
+}
+
+impl PathCache {
+    pub fn clear(&mut self) {
+        self.tables.clear();
+    }
+
+    pub fn build_path(&mut self, doc: &Document, index: Index, style: PathStyle) -> String {
+        match style {
+            PathStyle::XPath => self
+                .build_xpath(doc, index)
+                .unwrap_or_else(|e| format!("({e})")),
+            PathStyle::Literal => self.build_literal_path(doc, index),
+        }
+    }
+
+    fn table(&mut self, doc: &Document, index: Index) -> &SiblingTable {
+        let parent = doc.flat[index].parent();
+        let key = match parent {
+            OptionIndex::Index(p) => p,
+            OptionIndex::Nil => NIL,
+        };
+        self.tables.entry(key).or_insert_with(|| {
+            // Top-level nodes are siblings starting at row 0.
+            let mut child = match parent {
+                OptionIndex::Index(p) => doc.flat.first_child(p),
+                OptionIndex::Nil => OptionIndex::Index(0),
+            };
+            let mut positions = Vec::new();
+            let mut totals: HashMap<String, u32> = HashMap::new();
+            while let OptionIndex::Index(c) = child {
+                let pos = match element_tag(doc, c) {
+                    Some(tag) => {
+                        let n = totals.entry(tag.to_string()).or_insert(0);
+                        *n += 1;
+                        *n
+                    }
+                    None => 0,
+                };
+                positions.push(pos);
+                child = doc.flat.next_sibling(c);
+            }
+            SiblingTable { positions, totals }
+        })
+    }
+
+    /// 1-based position of `index` among its *same-tag* siblings.
+    fn same_tag_position(&mut self, doc: &Document, index: Index) -> usize {
+        let i = doc.flat[index].index_in_parent as usize;
+        (self.table(doc, index).positions[i] as usize).max(1)
+    }
+
+    /// True if no sibling (in either direction) shares `index`'s tag — i.e.
+    /// `same_tag_position` would always be 1 for it, so a `[1]` predicate
+    /// would carry no information.
+    fn is_unique_among_siblings(&mut self, doc: &Document, index: Index) -> bool {
+        let Some(tag) = element_tag(doc, index) else {
+            return true;
+        };
+        self.table(doc, index).totals.get(tag).copied().unwrap_or(0) <= 1
+    }
+
+    /// See the free function `build_xpath`.
+    pub fn build_xpath(&mut self, doc: &Document, index: Index) -> Result<String, String> {
+        let index = normalize(doc, index);
+
+        let leaf_node_test = match &doc.flat[index].value {
+            Value::Text => Some("text()"),
+            Value::CData => Some("text()"),
+            Value::Comment => Some("comment()"),
+            Value::ProcessingInstruction => Some("processing-instruction()"),
+            Value::DocType => {
+                return Err("a DOCTYPE declaration has no XPath representation".to_string());
+            }
+            _ => None,
+        };
+
+        let mut segments: Vec<String> = Vec::new();
+        let mut element = match leaf_node_test {
+            Some(node_test) => {
+                segments.push(node_test.to_string());
+                doc.flat[index].parent()
+            }
+            None => OptionIndex::Index(index),
+        };
+        while let OptionIndex::Index(e) = element {
+            let tag = element_tag(doc, e).unwrap_or("?");
+            let pos = self.same_tag_position(doc, e);
+            segments.push(format!("{tag}[{pos}]"));
+            element = doc.flat[e].parent();
+        }
+
+        segments.reverse();
+        Ok(format!("/{}", segments.join("/")))
+    }
+
+    /// See the free function `build_literal_path`.
+    pub fn build_literal_path(&mut self, doc: &Document, index: Index) -> String {
+        let index = normalize(doc, index);
+
+        let leaf_label = match &doc.flat[index].value {
+            Value::Text => Some("text"),
+            Value::CData => Some("CDATA"),
+            Value::Comment => Some("comment"),
+            Value::ProcessingInstruction => Some("PI"),
+            Value::DocType => Some("DOCTYPE"),
+            _ => None,
+        };
+
+        let mut segments: Vec<String> = Vec::new();
+        let mut element = match leaf_label {
+            Some(label) => {
+                segments.push(label.to_string());
+                doc.flat[index].parent()
+            }
+            None => OptionIndex::Index(index),
+        };
+        while let OptionIndex::Index(e) = element {
+            let tag = element_tag(doc, e).unwrap_or("?");
+            if self.is_unique_among_siblings(doc, e) {
+                segments.push(tag.to_string());
+            } else {
+                segments.push(format!("{tag}[{}]", self.same_tag_position(doc, e)));
+            }
+            element = doc.flat[e].parent();
+        }
+
+        segments.reverse();
+        segments.join("/")
     }
 }
 
@@ -65,20 +219,13 @@ fn element_tag(doc: &Document, index: Index) -> Option<&str> {
     }
 }
 
-/// 1-based position of `index` among its *same-tag* siblings.
-fn same_tag_position(doc: &Document, index: Index) -> usize {
-    let Some(tag) = element_tag(doc, index) else {
-        return 1;
-    };
-    let mut count = 1usize;
-    let mut prev = doc.flat[index].prev_sibling;
-    while let OptionIndex::Index(p) = prev {
-        if element_tag(doc, p) == Some(tag) {
-            count += 1;
-        }
-        prev = doc.flat[p].prev_sibling;
+/// A closing-tag row and its opening row are the same logical node.
+fn normalize(doc: &Document, index: Index) -> Index {
+    if doc.flat[index].is_closing_of_container() {
+        doc.flat[index].pair_index().unwrap()
+    } else {
+        index
     }
-    count
 }
 
 /// Builds `/root/child[2]/grandchild` (or `/root/child[2]/text()` etc. for
@@ -94,72 +241,12 @@ fn same_tag_position(doc: &Document, index: Index) -> usize {
 /// real XPath engine rejects. DocType is prolog-only (at most one per
 /// document) and rarely a deliberate yank target, so an explicit "not
 /// addressable" error is the honest answer, not a best-effort guess.
+///
+/// One-off convenience (builds a throwaway `PathCache`); repeated callers
+/// should keep a `PathCache` instead.
+#[allow(dead_code)] // the app uses `PathCache::build_xpath`; kept for one-off callers
 pub fn build_xpath(doc: &Document, index: Index) -> Result<String, String> {
-    let index = if doc.flat[index].is_closing_of_container() {
-        doc.flat[index].pair_index().unwrap()
-    } else {
-        index
-    };
-
-    let leaf_node_test = match &doc.flat[index].value {
-        Value::Text => Some("text()"),
-        Value::CData => Some("text()"),
-        Value::Comment => Some("comment()"),
-        Value::ProcessingInstruction => Some("processing-instruction()"),
-        Value::DocType => {
-            return Err("a DOCTYPE declaration has no XPath representation".to_string());
-        }
-        _ => None,
-    };
-
-    let mut segments: Vec<String> = Vec::new();
-
-    if let Some(node_test) = leaf_node_test {
-        segments.push(node_test.to_string());
-        if let OptionIndex::Index(parent) = doc.flat[index].parent {
-            build_element_path(doc, parent, &mut segments);
-        }
-    } else {
-        build_element_path(doc, index, &mut segments);
-    }
-
-    segments.reverse();
-    Ok(format!("/{}", segments.join("/")))
-}
-
-fn build_element_path(doc: &Document, index: Index, segments: &mut Vec<String>) {
-    let tag = element_tag(doc, index).unwrap_or("?");
-    let pos = same_tag_position(doc, index);
-    segments.push(format!("{tag}[{pos}]"));
-    if let OptionIndex::Index(parent) = doc.flat[index].parent {
-        build_element_path(doc, parent, segments);
-    }
-}
-
-/// True if no sibling (in either direction) shares `index`'s tag — i.e.
-/// `same_tag_position` would always be 1 for it, so a `[1]` predicate
-/// would carry no information. Checks both directions, not just "nothing
-/// before it," since a same-tag sibling *after* it would make position 1
-/// just as ambiguous as one before it would.
-fn is_unique_among_siblings(doc: &Document, index: Index) -> bool {
-    let Some(tag) = element_tag(doc, index) else {
-        return true;
-    };
-    let mut prev = doc.flat[index].prev_sibling;
-    while let OptionIndex::Index(p) = prev {
-        if element_tag(doc, p) == Some(tag) {
-            return false;
-        }
-        prev = doc.flat[p].prev_sibling;
-    }
-    let mut next = doc.flat[index].next_sibling;
-    while let OptionIndex::Index(n) = next {
-        if element_tag(doc, n) == Some(tag) {
-            return false;
-        }
-        next = doc.flat[n].next_sibling;
-    }
-    true
+    PathCache::default().build_xpath(doc, index)
 }
 
 /// The "literal path" header toggle's other mode: a plain breadcrumb of
@@ -176,47 +263,9 @@ fn is_unique_among_siblings(doc: &Document, index: Index) -> bool {
 /// Never fails, unlike `build_xpath` — a `DocType` row just gets a plain
 /// "DOCTYPE" segment, since this was never claiming to be valid XPath
 /// syntax in the first place.
+#[allow(dead_code)] // the header uses `PathCache::build_path`; kept for one-off callers
 pub fn build_literal_path(doc: &Document, index: Index) -> String {
-    let index = if doc.flat[index].is_closing_of_container() {
-        doc.flat[index].pair_index().unwrap()
-    } else {
-        index
-    };
-
-    let leaf_label = match &doc.flat[index].value {
-        Value::Text => Some("text"),
-        Value::CData => Some("CDATA"),
-        Value::Comment => Some("comment"),
-        Value::ProcessingInstruction => Some("PI"),
-        Value::DocType => Some("DOCTYPE"),
-        _ => None,
-    };
-
-    let mut segments: Vec<String> = Vec::new();
-
-    if let Some(label) = leaf_label {
-        segments.push(label.to_string());
-        if let OptionIndex::Index(parent) = doc.flat[index].parent {
-            build_literal_element_path(doc, parent, &mut segments);
-        }
-    } else {
-        build_literal_element_path(doc, index, &mut segments);
-    }
-
-    segments.reverse();
-    segments.join("/")
-}
-
-fn build_literal_element_path(doc: &Document, index: Index, segments: &mut Vec<String>) {
-    let tag = element_tag(doc, index).unwrap_or("?");
-    if is_unique_among_siblings(doc, index) {
-        segments.push(tag.to_string());
-    } else {
-        segments.push(format!("{tag}[{}]", same_tag_position(doc, index)));
-    }
-    if let OptionIndex::Index(parent) = doc.flat[index].parent {
-        build_literal_element_path(doc, parent, segments);
-    }
+    PathCache::default().build_literal_path(doc, index)
 }
 
 #[cfg(test)]
@@ -302,6 +351,27 @@ mod tests {
     fn test_literal_path_doctype_never_errors() {
         let d = doc("<!DOCTYPE html><root/>");
         assert_eq!(build_literal_path(&d, 0), "DOCTYPE");
+    }
+
+    #[test]
+    fn test_cache_matches_fresh_builds_across_many_lookups() {
+        // One PathCache reused for every row (as the header does) must
+        // agree with a fresh build for each, in both styles.
+        let d = doc("<r><a/><b><a/><a>t</a><c/></b><a/><!--x--></r>");
+        let mut cache = PathCache::default();
+        for i in 0..d.flat.len() as Index {
+            for style in [PathStyle::XPath, PathStyle::Literal] {
+                assert_eq!(
+                    cache.build_path(&d, i, style),
+                    PathCache::default().build_path(&d, i, style),
+                    "row {i}, {style:?}"
+                );
+            }
+        }
+        // 0 r, 1 a, 2 b, 3 a, 4 a, 5 text, 6 /a, 7 c, 8 /b, 9 a, 10 comment, 11 /r
+        assert_eq!(cache.build_path(&d, 9, PathStyle::XPath), "/r[1]/a[2]");
+        assert_eq!(cache.build_path(&d, 4, PathStyle::Literal), "r/b/a[2]");
+        assert_eq!(cache.build_path(&d, 7, PathStyle::Literal), "r/b/c");
     }
 
     #[test]

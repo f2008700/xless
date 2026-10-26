@@ -17,7 +17,7 @@ use crate::edit::{self, EditHistory};
 use crate::flatxml::Index;
 use crate::input::TuiEvent;
 use crate::path;
-use crate::screenwriter::ScreenWriter;
+use crate::screenwriter::{ScreenWriter, HEADER_ROWS};
 use crate::search::{Direction, SearchState};
 use crate::types::TTYDimensions;
 use crate::viewer::{Action, Viewer};
@@ -48,6 +48,10 @@ pub struct App<W: IoWrite> {
     /// Which flavor the header bar (screenwriter.rs's
     /// `print_header_into_buffer`) shows — toggled with `X`.
     path_style: path::PathStyle,
+    /// Sibling-position tables behind the header path, rebuilt every
+    /// frame — see `path::PathCache`. Must be cleared whenever the
+    /// document is replaced (successful edit/undo/redo).
+    path_cache: path::PathCache,
 }
 
 impl<W: IoWrite> App<W> {
@@ -73,6 +77,7 @@ impl<W: IoWrite> App<W> {
             showing_help: false,
             help_scroll: 0,
             path_style: path::PathStyle::XPath,
+            path_cache: path::PathCache::default(),
         }
     }
 
@@ -85,7 +90,7 @@ impl<W: IoWrite> App<W> {
     fn build_help_text(&self) -> Vec<String> {
         let mut lines = Vec::new();
         lines.push(
-            "xless — keyboard reference        (j/k/arrows scroll, q/Esc to close)".to_string(),
+            "xless — keyboard reference   (scroll with your movement keys or arrows; quit key or Esc closes)".to_string(),
         );
         lines.push(String::new());
 
@@ -184,8 +189,9 @@ impl<W: IoWrite> App<W> {
             self.message = None;
 
             // While the help screen is up, it owns input and behaves like
-            // its own little pager — j/k/arrows/Ctrl-d/Ctrl-u/g/G scroll
-            // it, `q`/Esc/Ctrl-c close it back to the normal view, and
+            // its own little pager — the configured movement/page keys (or
+            // arrows) scroll it, the quit key/Esc/Ctrl-c close it back to
+            // the normal view (see `handle_help_key`), and
             // anything else is just ignored. This mirrors `less`/`man`'s
             // own help (itself a navigable pager you quit with `q`), not
             // "any key closes it" — that first version was wrong: the
@@ -243,9 +249,14 @@ impl<W: IoWrite> App<W> {
     fn handle_mouse(&mut self, me: MouseEvent) -> Flow {
         match me {
             MouseEvent::Press(MouseButton::Left, _, row) => {
-                let content_height = self.screen_writer.dimensions.height.saturating_sub(1);
-                if row <= content_height {
-                    self.viewer.perform_action(Action::Click(row - 1));
+                // termion rows are 1-based; the first HEADER_ROWS rows are
+                // the path header and the last is the status bar, so
+                // document content occupies rows HEADER_ROWS+1 ..= height-1.
+                let first_content_row = HEADER_ROWS + 1;
+                let last_content_row = self.screen_writer.dimensions.height.saturating_sub(1);
+                if (first_content_row..=last_content_row).contains(&row) {
+                    self.viewer
+                        .perform_action(Action::Click(row - first_content_row));
                 }
             }
             MouseEvent::Press(MouseButton::WheelUp, _, _) => {
@@ -271,11 +282,11 @@ impl<W: IoWrite> App<W> {
         input: &mut I,
     ) -> Flow {
         // Digit-count prefix: accumulate and wait for the actual command,
-        // same as vim's `3j`. A leading '0' is itself a command (focus
-        // first sibling convention, `^`-adjacent) rather than a count, to
-        // match the "0 doesn't start a count" vim convention — but once
-        // *any* digit has been typed, a following '0' is part of the
-        // count, same as vim.
+        // same as vim's `3j`. A leading '0' doesn't start a count (vim's
+        // convention) — it falls through to the keymap, where it's
+        // currently unbound (config.rs rejects digit bindings) and so does
+        // nothing. Once *any* digit has been typed, a following '0' is
+        // part of the count, same as vim.
         if let Key::Char(c @ '0'..='9') = key {
             if !(c == '0' && self.count_buffer.is_empty()) {
                 self.count_buffer.push(c);
@@ -513,6 +524,9 @@ impl<W: IoWrite> App<W> {
             .find(&self.viewer.doc, self.viewer.focused_row, direction)
         {
             Some(row) => {
+                if row == self.viewer.focused_row {
+                    self.message = Some(format!("/{}: this is the only match", self.search.term));
+                }
                 self.search.current_match = Some(row);
                 self.viewer.perform_action(Action::JumpTo(row));
                 self.viewer.perform_action(Action::MoveFocusedLineToCenter);
@@ -533,7 +547,10 @@ impl<W: IoWrite> App<W> {
     /// doc comment), so it gets its own method instead of going through
     /// the infallible `yank` helper above.
     fn yank_xpath(&mut self) {
-        match path::build_xpath(&self.viewer.doc, self.viewer.focused_row) {
+        match self
+            .path_cache
+            .build_xpath(&self.viewer.doc, self.viewer.focused_row)
+        {
             Ok(text) => self.yank_text(text),
             Err(e) => self.message = Some(e),
         }
@@ -564,6 +581,7 @@ impl<W: IoWrite> App<W> {
                 // leaves row numbering untouched and a still-valid match
                 // shouldn't lose its highlight over nothing happening.
                 self.search.current_match = None;
+                self.path_cache.clear();
                 self.message = Some("edited".to_string());
             }
             Err(e) => self.message = Some(format!("edit rejected: {e}")),
@@ -700,6 +718,7 @@ impl<W: IoWrite> App<W> {
             // comment on why current_match must be cleared here too.
             Ok(true) => {
                 self.search.current_match = None;
+                self.path_cache.clear();
                 self.message = Some("undo".to_string());
             }
             Ok(false) => self.message = Some("nothing to undo".to_string()),
@@ -711,6 +730,7 @@ impl<W: IoWrite> App<W> {
         match self.edit_history.redo(&mut self.viewer) {
             Ok(true) => {
                 self.search.current_match = None;
+                self.path_cache.clear();
                 self.message = Some("redo".to_string());
             }
             Ok(false) => self.message = Some("nothing to redo".to_string()),
@@ -784,20 +804,30 @@ impl<W: IoWrite> App<W> {
 
     // --- Help screen (a tiny pager of its own) ---------------------------
 
+    /// The help pager scrolls with whatever keys are bound to the
+    /// equivalent viewer actions (so a remapped `move_down` scrolls help
+    /// too), plus the terminal's own navigation keys and Esc/Ctrl-c, which
+    /// always work. An earlier version hardcoded j/k/g/G/q here, ignoring
+    /// ~/.xless/settings.json entirely.
     fn handle_help_key(&mut self, key: Key) {
         match key {
-            Key::Char('q') | Key::Esc | Key::Ctrl('c') => self.showing_help = false,
-            Key::Char('j') | Key::Down => self.scroll_help(1),
-            Key::Char('k') | Key::Up => self.scroll_help(-1),
-            Key::Char(' ') | Key::Ctrl('d') | Key::PageDown => {
-                self.scroll_help(self.help_page_size())
-            }
-            Key::Ctrl('u') | Key::PageUp => self.scroll_help(-self.help_page_size()),
-            Key::Char('g') | Key::Home => self.help_scroll = 0,
-            Key::Char('G') | Key::End => {
-                self.help_scroll = self.help_max_scroll();
-            }
-            _ => {}
+            Key::Esc | Key::Ctrl('c') => self.showing_help = false,
+            Key::Down => self.scroll_help(1),
+            Key::Up => self.scroll_help(-1),
+            Key::PageDown => self.scroll_help(self.help_page_size()),
+            Key::PageUp => self.scroll_help(-self.help_page_size()),
+            Key::Home => self.help_scroll = 0,
+            Key::End => self.help_scroll = self.help_max_scroll(),
+            _ => match self.keymap.actions.get(&key) {
+                Some(AppAction::Quit) => self.showing_help = false,
+                Some(AppAction::MoveDown | AppAction::ScrollDown) => self.scroll_help(1),
+                Some(AppAction::MoveUp | AppAction::ScrollUp) => self.scroll_help(-1),
+                Some(AppAction::PageDown) => self.scroll_help(self.help_page_size()),
+                Some(AppAction::PageUp) => self.scroll_help(-self.help_page_size()),
+                Some(AppAction::FocusTop) => self.help_scroll = 0,
+                Some(AppAction::FocusBottom) => self.help_scroll = self.help_max_scroll(),
+                _ => {}
+            },
         }
     }
 
@@ -825,13 +855,18 @@ impl<W: IoWrite> App<W> {
             self.screen_writer
                 .print_help(&text, self.help_scroll as usize);
         } else {
+            let header = self.path_cache.build_path(
+                &self.viewer.doc,
+                self.viewer.focused_row,
+                self.path_style,
+            );
             self.screen_writer.print(
                 &self.viewer,
                 &self.filename,
                 self.edit_history.is_dirty(),
                 &self.search,
                 &self.message,
-                self.path_style,
+                &header,
             );
         }
     }
